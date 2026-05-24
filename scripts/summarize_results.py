@@ -2,6 +2,8 @@ import argparse
 import csv
 import json
 import pickle
+import re
+from collections import Counter
 from pathlib import Path
 
 
@@ -10,26 +12,36 @@ DEFAULT_RESULTS_DIR = Path("ignore/results")
 
 def parse_folder_name(folder_name):
     """
-    Extract the agent name and MLLM name from a result folder name.
+    Extract the agent name, MLLM name, and optional run label from a result folder name.
 
-    Example:
+    Examples:
     Agent_DataMap__MLLM_None
-    becomes:
-    agent = DataMap
-    mllm = None
+        agent = DataMap
+        mllm = None
+        label = N/A
+
+    Agent_DataMap__MLLM_gemma3_27b__small_10x1
+        agent = DataMap
+        mllm = gemma3_27b
+        label = small_10x1
     """
     parts = folder_name.split("__")
 
     agent = "Unknown"
     mllm = "Unknown"
+    extra_parts = []
 
     for part in parts:
         if part.startswith("Agent_"):
             agent = part.replace("Agent_", "")
         elif part.startswith("MLLM_"):
             mllm = part.replace("MLLM_", "")
+        else:
+            extra_parts.append(part)
 
-    return agent, mllm
+    label = "__".join(extra_parts) if extra_parts else "N/A"
+
+    return agent, mllm, label
 
 
 def load_json(path):
@@ -61,17 +73,39 @@ def load_pickle(path):
         return None
 
 
+def yes_no(value):
+    """
+    Convert True/False into a cleaner table value.
+    """
+    return "Yes" if value else "No"
+
+
+def get_episode_list(episodes):
+    """
+    Convert saved episodes into a list, whether episodes is a dictionary or list.
+    """
+    if episodes is None:
+        return []
+
+    if isinstance(episodes, dict):
+        return list(episodes.values())
+
+    try:
+        return list(episodes)
+    except Exception:
+        return []
+
+
 def count_episodes_from_data(episodes):
     """
     Count how many episodes are saved in episodes.p.
     """
-    if episodes is None:
+    episode_list = get_episode_list(episodes)
+
+    if not episode_list:
         return "N/A"
 
-    try:
-        return len(episodes)
-    except Exception:
-        return "N/A"
+    return len(episode_list)
 
 
 def get_episode_value(episode, possible_names):
@@ -96,8 +130,13 @@ def get_difficulty_summary(episodes):
 
     If multiple difficulties are found, return them as a comma-separated list.
     If no difficulty information exists, return N/A.
+
+    Note:
+    The current Episode object may not store difficulty directly, so N/A is normal.
     """
-    if episodes is None:
+    episode_list = get_episode_list(episodes)
+
+    if not episode_list:
         return "N/A"
 
     possible_names = [
@@ -111,17 +150,11 @@ def get_difficulty_summary(episodes):
     difficulties = []
 
     try:
-        if isinstance(episodes, dict):
-            episode_list = episodes.values()
-        else:
-            episode_list = episodes
-
         for episode in episode_list:
             value = get_episode_value(episode, possible_names)
 
             if value is not None:
                 difficulties.append(str(value))
-
     except Exception:
         return "N/A"
 
@@ -133,11 +166,174 @@ def get_difficulty_summary(episodes):
     return ", ".join(unique_difficulties)
 
 
-def yes_no(value):
+def parse_waypoint_from_response(response):
     """
-    Convert True/False into a cleaner table value.
+    Try to parse a waypoint from an MLLM response.
+
+    Expected format:
+    [WAYPOINT]: (x, y)
+
+    Returns:
+    (x, y) as a tuple of ints, or None if parsing fails.
     """
-    return "Yes" if value else "No"
+    if not isinstance(response, str):
+        return None
+
+    match = re.search(r"\[WAYPOINT\]\s*:\s*\(?\s*(-?\d+)\s*,\s*(-?\d+)\s*\)?", response)
+
+    if not match:
+        return None
+
+    try:
+        x = int(match.group(1))
+        y = int(match.group(2))
+        return (x, y)
+    except Exception:
+        return None
+
+
+def count_mllm_calls_and_waypoints(episode):
+    """
+    Count MLLM calls and parsed waypoints from episode states.
+
+    In the current code, HighLevelPolicy stores the MLLM response in:
+    high_level_policy_response
+
+    This is more reliable than only checking waypoint_history.
+    """
+    states = get_episode_value(episode, ["states"])
+
+    if not states:
+        return 0, 0
+
+    mllm_calls = 0
+    parsed_waypoints = 0
+
+    try:
+        for state in states:
+            if not isinstance(state, dict):
+                continue
+
+            if "high_level_policy_response" in state:
+                mllm_calls += 1
+                response = state.get("high_level_policy_response")
+                waypoint = parse_waypoint_from_response(response)
+
+                if waypoint is not None:
+                    parsed_waypoints += 1
+    except Exception:
+        return 0, 0
+
+    return mllm_calls, parsed_waypoints
+
+
+def summarize_episodes(episodes):
+    """
+    Extract episode-level metrics such as:
+    - successes
+    - failures
+    - average steps
+    - average waypoint count
+    - MLLM calls
+    - termination reasons
+    """
+    episode_list = get_episode_list(episodes)
+
+    if not episode_list:
+        return {
+            "successes": "N/A",
+            "failures": "N/A",
+            "avg_steps": "N/A",
+            "avg_waypoints": "N/A",
+            "episodes_with_waypoints": "N/A",
+            "total_mllm_calls": "N/A",
+            "avg_mllm_calls": "N/A",
+            "termination_reasons": "N/A",
+        }
+
+    successes = 0
+    failures = 0
+
+    step_counts = []
+    waypoint_counts = []
+    mllm_call_counts = []
+
+    episodes_with_waypoints = 0
+    termination_counter = Counter()
+
+    for episode in episode_list:
+        termination = get_episode_value(episode, ["termination"])
+        termination_str = str(termination) if termination is not None else "unknown"
+        termination_counter[termination_str] += 1
+
+        if termination == "goal_reached":
+            successes += 1
+        else:
+            failures += 1
+
+        action_history = get_episode_value(episode, ["action_history"])
+        waypoint_history = get_episode_value(episode, ["waypoint_history"])
+
+        if action_history is not None:
+            try:
+                step_counts.append(len(action_history))
+            except Exception:
+                pass
+
+        # Count waypoints from waypoint_history if available.
+        n_waypoints_from_history = 0
+        if waypoint_history is not None:
+            try:
+                n_waypoints_from_history = len(waypoint_history)
+            except Exception:
+                n_waypoints_from_history = 0
+
+        # Also count parsed MLLM waypoint responses from episode.states.
+        mllm_calls, parsed_waypoints = count_mllm_calls_and_waypoints(episode)
+
+        # Use whichever count is larger, because waypoint_history may not always be updated.
+        n_waypoints = max(n_waypoints_from_history, parsed_waypoints)
+
+        waypoint_counts.append(n_waypoints)
+        mllm_call_counts.append(mllm_calls)
+
+        if n_waypoints > 0:
+            episodes_with_waypoints += 1
+
+    avg_steps = (
+        round(sum(step_counts) / len(step_counts), 2)
+        if step_counts
+        else "N/A"
+    )
+
+    avg_waypoints = (
+        round(sum(waypoint_counts) / len(waypoint_counts), 2)
+        if waypoint_counts
+        else "N/A"
+    )
+
+    total_mllm_calls = sum(mllm_call_counts)
+
+    avg_mllm_calls = (
+        round(total_mllm_calls / len(mllm_call_counts), 2)
+        if mllm_call_counts
+        else "N/A"
+    )
+
+    termination_reasons = ", ".join(
+        f"{reason}:{count}" for reason, count in sorted(termination_counter.items())
+    )
+
+    return {
+        "successes": successes,
+        "failures": failures,
+        "avg_steps": avg_steps,
+        "avg_waypoints": avg_waypoints,
+        "episodes_with_waypoints": episodes_with_waypoints,
+        "total_mllm_calls": total_mllm_calls,
+        "avg_mllm_calls": avg_mllm_calls,
+        "termination_reasons": termination_reasons,
+    }
 
 
 def summarize_results(results_dir):
@@ -155,13 +351,14 @@ def summarize_results(results_dir):
         image_path = result_folder / "image_display.png"
         checkpoints_path = result_folder / "checkpoints"
 
-        agent, mllm = parse_folder_name(result_folder.name)
+        agent, mllm, label = parse_folder_name(result_folder.name)
 
         metrics = {}
         status = "Complete"
 
         if metrics_path.exists():
             metrics = load_json(metrics_path)
+
             if not metrics:
                 status = "Invalid metrics.json"
         else:
@@ -172,6 +369,7 @@ def summarize_results(results_dir):
         episodes = load_pickle(episodes_path)
         episode_count = count_episodes_from_data(episodes)
         difficulty = get_difficulty_summary(episodes)
+        episode_summary = summarize_episodes(episodes)
 
         has_image = image_path.exists()
         has_checkpoints = checkpoints_path.exists()
@@ -181,9 +379,18 @@ def summarize_results(results_dir):
                 "folder": result_folder.name,
                 "agent": agent,
                 "mllm": mllm,
+                "label": label,
                 "difficulty": difficulty,
                 "accuracy": accuracy,
                 "episodes": episode_count,
+                "successes": episode_summary["successes"],
+                "failures": episode_summary["failures"],
+                "avg_steps": episode_summary["avg_steps"],
+                "avg_waypoints": episode_summary["avg_waypoints"],
+                "episodes_with_waypoints": episode_summary["episodes_with_waypoints"],
+                "total_mllm_calls": episode_summary["total_mllm_calls"],
+                "avg_mllm_calls": episode_summary["avg_mllm_calls"],
+                "termination_reasons": episode_summary["termination_reasons"],
                 "has_image": yes_no(has_image),
                 "has_checkpoints": yes_no(has_checkpoints),
                 "status": status,
@@ -202,31 +409,46 @@ def print_table(rows):
         return
 
     print(
-        f"{'Folder':40} "
+        f"{'Folder':45} "
         f"{'Agent':16} "
         f"{'MLLM':14} "
-        f"{'Difficulty':12} "
+        f"{'Label':12} "
         f"{'Accuracy':10} "
         f"{'Episodes':10} "
+        f"{'Success':8} "
+        f"{'Fail':8} "
+        f"{'AvgStep':8} "
+        f"{'AvgWP':8} "
+        f"{'EpWP':8} "
+        f"{'MLLMCalls':10} "
         f"{'Image':8} "
         f"{'Checkpoints':12} "
         f"{'Status':20}"
     )
 
-    print("-" * 155)
+    print("-" * 205)
 
     for row in rows:
         print(
-            f"{row['folder']:40} "
-            f"{row['agent']:16} "
-            f"{row['mllm']:14} "
-            f"{str(row['difficulty']):12} "
-            f"{str(row['accuracy']):10} "
-            f"{str(row['episodes']):10} "
-            f"{row['has_image']:8} "
-            f"{row['has_checkpoints']:12} "
-            f"{row['status']:20}"
+            f"{row['folder'][:45]:45} "
+            f"{row['agent'][:16]:16} "
+            f"{row['mllm'][:14]:14} "
+            f"{row['label'][:12]:12} "
+            f"{str(row['accuracy'])[:10]:10} "
+            f"{str(row['episodes'])[:10]:10} "
+            f"{str(row['successes'])[:8]:8} "
+            f"{str(row['failures'])[:8]:8} "
+            f"{str(row['avg_steps'])[:8]:8} "
+            f"{str(row['avg_waypoints'])[:8]:8} "
+            f"{str(row['episodes_with_waypoints'])[:8]:8} "
+            f"{str(row['total_mllm_calls'])[:10]:10} "
+            f"{row['has_image'][:8]:8} "
+            f"{row['has_checkpoints'][:12]:12} "
+            f"{row['status'][:20]:20}"
         )
+
+    print()
+    print("Note: full termination reason details are included in the CSV output if you use --csv.")
 
 
 def write_csv(rows, output_path):
@@ -241,9 +463,18 @@ def write_csv(rows, output_path):
         "folder",
         "agent",
         "mllm",
+        "label",
         "difficulty",
         "accuracy",
         "episodes",
+        "successes",
+        "failures",
+        "avg_steps",
+        "avg_waypoints",
+        "episodes_with_waypoints",
+        "total_mllm_calls",
+        "avg_mllm_calls",
+        "termination_reasons",
         "has_image",
         "has_checkpoints",
         "status",
