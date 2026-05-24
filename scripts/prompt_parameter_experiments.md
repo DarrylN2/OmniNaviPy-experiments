@@ -2,13 +2,27 @@
 
 ## Goal
 
-This note identifies where the MLLM prompt is created and proposes small experiments for testing prompt and evaluation parameter changes. The goal is to understand the AI-side behavior before changing the main navigation logic.
+This note tracks small prompt and parameter experiments for the MLLM waypoint logic in OmniNaviPy.
+
+The goal is to understand the AI-side behavior before changing the main navigation logic, model, or perception pipeline.
+
+Current focus:
+
+```text
+When should the MLLM be called?
+```
+
+The easiest controlled experiment is changing the MLLM stuck-detection parameters instead of changing the model or prompt first.
+
+---
 
 ## Main Prompt Location
 
 The MLLM prompt appears to be built in:
 
-- `modules/Other.py`
+```text
+modules/Other.py
+```
 
 Important sections found through `grep`:
 
@@ -20,6 +34,8 @@ Important sections found through `grep`:
   - Parses waypoint coordinates from the MLLM response.
 - `modules/Other.py:411`
   - Defines the `chat()` function used to communicate with the MLLM.
+
+---
 
 ## What the Prompt Seems To Do
 
@@ -43,6 +59,8 @@ The prompt also explains the map colors:
 
 The MLLM is asked to generate a safe intermediate waypoint that helps the robot get unstuck and make progress toward the target.
 
+---
+
 ## Expected MLLM Output Format
 
 The prompt asks the MLLM to respond in this format:
@@ -51,20 +69,41 @@ The prompt asks the MLLM to respond in this format:
 [STRATEGY]: reason for generating the waypoint. [WAYPOINT]: (x, y).
 ```
 
-## Completed Experiments
+The waypoint parser expects the response to contain:
 
-### Experiment 1: DataMap without MLLM
-
-Settings:
-
-```python
-agent_type = "DataMap"
-mllm_model = None
-n_per_difficulty = 1
-n_difficulties = 1
+```text
+[WAYPOINT]: (x, y)
 ```
 
-## Experiment Results
+If the output does not follow the expected format, the waypoint may not be parsed correctly.
+
+---
+
+## Relevant Trigger Parameters
+
+The high-level MLLM waypoint logic is controlled mainly by these parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `progress_threshold` | Minimum progress toward the target required over the recent path window |
+| `waypoint_threshold` | Distance needed to consider a waypoint reached |
+| `n_points` | Number of recent path points used to check whether the drone is stuck |
+| `pause_after_waypoint` | Whether to pause MLLM checks after a waypoint is generated |
+
+The stuck detector checks whether the drone has made enough progress toward the target over the last `n_points`.
+
+In simple terms:
+
+- Higher `progress_threshold` makes the stuck detector more sensitive.
+- Lower `n_points` makes the MLLM check for stuck behavior earlier.
+- Higher `n_points` makes the MLLM wait longer before deciding the drone is stuck.
+- `pause_after_waypoint=True` helps avoid repeatedly calling the MLLM too quickly.
+
+---
+
+## Completed Quick Experiments
+
+Early small tests:
 
 | Experiment | Agent | MLLM | Episodes | Accuracy | Notes |
 |---|---|---|---:|---:|---|
@@ -75,8 +114,310 @@ n_difficulties = 1
 | 10x1 baseline | DataMap | None | 10 | 90% | Larger quick baseline |
 | 10x1 MLLM | DataMap | gemma3:27b | 10 | 90% | MLLM waypoint generation was triggered |
 
+---
+
 ## MLLM Bug Found
 
-During the 10x1 DataMap + gemma3:27b run, the evaluation reached the MLLM waypoint generation path and initially failed because `ollama` was not available/imported. Smaller MLLM runs did not expose this because they likely completed without triggering waypoint generation.
+During the 10x1 DataMap + gemma3:27b run, the evaluation reached the MLLM waypoint generation path and initially failed because `ollama` was not available/imported.
 
-After fixing the Ollama import/package issue, the MLLM run completed successfully and generated a waypoint response.
+Smaller MLLM runs did not expose this issue because they likely completed without triggering waypoint generation.
+
+After fixing the Ollama import/package issue, the MLLM run completed successfully and generated waypoint responses.
+
+---
+
+## Baseline: DataMap without MLLM
+
+Run folder:
+
+```text
+Agent_DataMap__MLLM_None__small_10x1
+```
+
+Settings:
+
+| Parameter | Value |
+|---|---|
+| `agent_type` | `DataMap` |
+| `mllm_model` | `None` |
+| `n_per_difficulty` | 10 |
+| `n_difficulties` | 1 |
+| `seed` | 777 |
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| MLLM calls | 0 |
+| Episodes with waypoints | 0 |
+
+Important finding:
+
+Episode 9 failed:
+
+```text
+termination = max_steps_exceeded
+final distance ≈ 50.96
+```
+
+Interpretation:
+
+Episode 9 appears to be a difficult trajectory even without MLLM.
+
+---
+
+## Baseline: DataMap with Default MLLM Trigger
+
+Run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1
+```
+
+Settings:
+
+| Parameter | Value |
+|---|---|
+| `agent_type` | `DataMap` |
+| `mllm_model` | `gemma3:27b` |
+| `progress_threshold` | 1 |
+| `waypoint_threshold` | 4 |
+| `n_points` | 8 |
+| `pause_after_waypoint` | True |
+| `n_per_difficulty` | 10 |
+| `n_difficulties` | 1 |
+| `seed` | 777 |
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| Episodes with MLLM calls | 1 |
+| Episodes with waypoints | 1 |
+| Total MLLM calls | 3 |
+| Average steps | 8.4 |
+| Average waypoints | 0.3 |
+
+Important finding:
+
+The MLLM only triggered in episode 9.
+
+Episode 9 still failed:
+
+```text
+termination = max_steps_exceeded
+steps = 32
+MLLM calls = 3
+waypoints = 3
+final distance ≈ 50.0
+```
+
+Interpretation:
+
+The default MLLM trigger activated on the hard episode, but it did not solve the failure.
+
+---
+
+## Experiment 1: Earlier Trigger Using Smaller `n_points`
+
+Run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+```
+
+Settings:
+
+| Parameter | Value |
+|---|---|
+| `agent_type` | `DataMap` |
+| `mllm_model` | `gemma3:27b` |
+| `progress_threshold` | 1 |
+| `waypoint_threshold` | 4 |
+| `n_points` | 5 |
+| `pause_after_waypoint` | True |
+| `n_per_difficulty` | 10 |
+| `n_difficulties` | 1 |
+| `seed` | 777 |
+
+Command:
+
+```bash
+python3 scripts/evaluate_navigation_mllm_trigger.py
+```
+
+Analysis commands:
+
+```bash
+python3 scripts/summarize_results.py
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5 --mllm-only
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5 --failures-only
+```
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| Episodes with MLLM calls | 2 |
+| Episodes with waypoints | 2 |
+| Total MLLM calls | 9 |
+| Average steps | 9.7 |
+| Average waypoints | 0.9 |
+| Average final distance | 10.43 |
+
+Episode-level observations:
+
+| Episode | Success | Termination | Steps | MLLM calls | Waypoints | Final distance |
+|---|---|---|---:|---:|---:|---:|
+| 5 | True | `goal_reached` | 24 | 3 | 3 | 8.0 |
+| 9 | False | `max_steps_exceeded` | 32 | 6 | 6 | 50.96 |
+
+Comparison with default MLLM trigger:
+
+| Setting | Accuracy | Episodes with MLLM calls | Total MLLM calls | Average steps |
+|---|---:|---:|---:|---:|
+| Default MLLM, `pt1_wp4_np8` | 90.0% | 1 | 3 | 8.4 |
+| Earlier trigger, `pt1_wp4_np5` | 90.0% | 2 | 9 | 9.7 |
+
+Interpretation:
+
+Reducing `n_points` from 8 to 5 made the stuck detector trigger more often.
+
+The MLLM became more active, but the accuracy did not improve.
+
+Episode 9 still failed. The MLLM was called more times on episode 9, but the final distance stayed around 50.96.
+
+Episode 5 is also interesting because it succeeded but required 24 steps and 3 MLLM calls. This may mean the smaller `n_points` value caused the MLLM to intervene in an episode that may not have needed help.
+
+Conclusion:
+
+```text
+Using n_points = 5 made the trigger more sensitive, but it did not improve success rate.
+It increased MLLM calls from 3 to 9 and did not fix the hard failed episode.
+This setting may be too sensitive.
+```
+
+---
+
+## Current Finding
+
+So far, changing only `n_points` from 8 to 5 does not improve performance.
+
+Main observation:
+
+```text
+More MLLM calls does not automatically mean better navigation.
+```
+
+The MLLM may need to be triggered at better times, or the generated waypoints may need to be evaluated more carefully.
+
+Episode 9 remains the key failure case to investigate.
+
+---
+
+## Next Planned Experiment
+
+Try increasing `progress_threshold` while keeping the original `n_points`.
+
+Proposed run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt3_wp4_np8
+```
+
+Proposed settings:
+
+| Parameter | Value |
+|---|---|
+| `progress_threshold` | 3 |
+| `waypoint_threshold` | 4 |
+| `n_points` | 8 |
+
+Reason:
+
+This keeps the original stuck-check window size but makes the progress requirement stricter.
+
+The goal is to see whether this triggers the MLLM at better times without being as jumpy as `n_points = 5`.
+
+Key questions:
+
+- Does episode 9 improve?
+- Does final distance decrease?
+- Does the MLLM trigger less excessively than `pt1_wp4_np5`?
+- Does it avoid interfering with already successful episodes?
+- Does accuracy improve beyond 90%?
+
+---
+
+## Experiment Naming Convention
+
+For controlled experiments, include the important parameter settings in the run folder name.
+
+Example:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+```
+
+Meaning:
+
+| Part | Meaning |
+|---|---|
+| `Agent_DataMap` | DataMap agent was used |
+| `MLLM_gemma3_27b` | gemma3:27b was used as the MLLM |
+| `small_10x1` | 10 trajectories from 1 difficulty |
+| `pt1` | `progress_threshold = 1` |
+| `wp4` | `waypoint_threshold = 4` |
+| `np5` | `n_points = 5` |
+
+This helps avoid overwriting old result folders and makes experiment comparison easier.
+
+---
+
+## Useful Analysis Commands
+
+Summarize all result folders:
+
+```bash
+python3 scripts/summarize_results.py
+```
+
+Analyze one run folder:
+
+```bash
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+```
+
+Analyze only MLLM-triggered episodes:
+
+```bash
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5 --mllm-only
+```
+
+Analyze only failures:
+
+```bash
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5 --failures-only
+```
+
+Export summaries to CSV:
+
+```bash
+python3 scripts/summarize_results.py --csv ignore/results_summary.csv
+python3 scripts/analyze_episodes.py --csv ignore/episode_summary.csv
+```
+
+The CSV files are saved under `ignore/`, so they are local analysis outputs and usually should not be committed.
