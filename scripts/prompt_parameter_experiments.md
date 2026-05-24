@@ -310,55 +310,155 @@ It increased MLLM calls from 3 to 9 and did not fix the hard failed episode.
 This setting may be too sensitive.
 ```
 
----
+### Generated waypoints for MLLM-triggered episodes
 
-## Current Finding
+For `pt1_wp4_np5`, the MLLM was triggered in episodes 5 and 9.
 
-So far, changing only `n_points` from 8 to 5 does not improve performance.
-
-Main observation:
+Episode 5 succeeded:
 
 ```text
-More MLLM calls does not automatically mean better navigation.
+steps = 24
+MLLM calls = 3
+waypoints = 3
+final distance = 8.0
+generated waypoints = (25, 69); (28, 65); (34, 66)
 ```
 
-The MLLM may need to be triggered at better times, or the generated waypoints may need to be evaluated more carefully.
+The strategy text repeatedly suggested moving to the right around a complex obstacle. This episode eventually reached the goal, but it required more steps than the other successful episodes.
 
-Episode 9 remains the key failure case to investigate.
+Episode 9 failed:
+
+```text
+termination = max_steps_exceeded
+steps = 32
+MLLM calls = 6
+waypoints = 6
+final distance = 50.96
+generated waypoints = (-20, 22); (-15, 20); (-20, 22); (-20, 22); (-20, 22); (-20, 22)
+```
+
+The MLLM mostly repeated the same waypoint `(-20, 22)`.
+
+Observation:
+
+Reducing `n_points` from 8 to 5 caused the MLLM to trigger more often, but the extra calls did not fix episode 9. In the failed episode, the generated waypoints were repetitive, suggesting that simply calling the MLLM more often may not be enough.
+
+Interpretation:
+
+The problem may be waypoint quality rather than only stuck-detection timing. A future improvement could check for repeated waypoints or modify the prompt to ask for a substantially different waypoint when previous suggestions failed.
 
 ---
 
-## Next Planned Experiment
+## Experiment 2: Higher `progress_threshold` With Original `n_points`
 
-Try increasing `progress_threshold` while keeping the original `n_points`.
-
-Proposed run folder:
+Run folder:
 
 ```text
 Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt3_wp4_np8
 ```
 
-Proposed settings:
+Settings:
 
 | Parameter | Value |
 |---|---|
+| `agent_type` | `DataMap` |
+| `mllm_model` | `gemma3:27b` |
 | `progress_threshold` | 3 |
 | `waypoint_threshold` | 4 |
 | `n_points` | 8 |
+| `pause_after_waypoint` | True |
+| `n_per_difficulty` | 10 |
+| `n_difficulties` | 1 |
+| `seed` | 777 |
 
-Reason:
+Command:
 
-This keeps the original stuck-check window size but makes the progress requirement stricter.
+```bash
+python3 scripts/evaluate_navigation_mllm_trigger.py
+```
 
-The goal is to see whether this triggers the MLLM at better times without being as jumpy as `n_points = 5`.
+Analysis commands:
 
-Key questions:
+```bash
+python3 scripts/summarize_results.py
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt3_wp4_np8
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt3_wp4_np8 --mllm-only
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt3_wp4_np8 --failures-only
+```
 
-- Does episode 9 improve?
-- Does final distance decrease?
-- Does the MLLM trigger less excessively than `pt1_wp4_np5`?
-- Does it avoid interfering with already successful episodes?
-- Does accuracy improve beyond 90%?
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| Episodes with MLLM calls | 1 |
+| Episodes with waypoints | 1 |
+| Average steps | 8.4 |
+| Average final distance | 9.94 |
+| Total MLLM calls | 3 |
+
+Episode-level observation:
+
+| Episode | Success | Termination | Steps | MLLM calls | Waypoints | Final distance |
+|---|---|---|---:|---:|---:|---:|
+| 9 | False | `max_steps_exceeded` | 32 | 3 | 3 | 50.0 |
+
+Generated waypoints for episode 9:
+
+```text
+(-20, 22); (-18, 22); (-15, 22)
+```
+
+The strategy text was repetitive. The MLLM repeatedly described the robot as being stuck near a complex obstacle and suggested moving left or laterally to clear the obstacle.
+
+Interpretation:
+
+Increasing `progress_threshold` from 1 to 3 while keeping `n_points = 8` did not change the overall behavior compared with the default MLLM setting.
+
+The MLLM still only triggered in episode 9, and episode 9 still failed with `max_steps_exceeded`.
+
+Conclusion:
+
+```text
+Changing progress_threshold from 1 to 3 did not improve performance.
+The issue may not only be when the MLLM is called.
+The generated waypoint quality or the hard trajectory itself may need deeper analysis.
+```
+
+---
+
+## Comparison Across Trigger Experiments
+
+| Setting | Accuracy | Episodes with MLLM calls | Total MLLM calls | Average steps | Episode 9 result |
+|---|---:|---:|---:|---:|---|
+| Default MLLM, `pt1_wp4_np8` | 90.0% | 1 | 3 | 8.4 | Failed |
+| Earlier trigger, `pt1_wp4_np5` | 90.0% | 2 | 9 | 9.7 | Failed |
+| Higher threshold, `pt3_wp4_np8` | 90.0% | 1 | 3 | 8.4 | Failed |
+
+Overall interpretation:
+
+Changing the trigger parameters changed how often the MLLM was called, but it did not improve the success rate.
+
+The `pt1_wp4_np5` setting caused more MLLM calls, but episode 9 still failed. The generated waypoints for episode 9 were repetitive:
+
+```text
+(-20, 22); (-15, 20); (-20, 22); (-20, 22); (-20, 22); (-20, 22)
+```
+
+This suggests that simply calling the MLLM more often is not enough.
+
+Main finding:
+
+```text
+More MLLM calls does not automatically mean better navigation.
+```
+
+The hard failure, episode 9, remains unsolved across the baseline MLLM run and both trigger-parameter experiments.
+
+The results suggest that the issue may not only be when the MLLM is called. The generated waypoint quality may also need to be analyzed.
 
 ---
 
@@ -421,3 +521,17 @@ python3 scripts/analyze_episodes.py --csv ignore/episode_summary.csv
 ```
 
 The CSV files are saved under `ignore/`, so they are local analysis outputs and usually should not be committed.
+
+---
+
+## Possible Next Directions
+
+Based on these experiments, the next useful direction is probably not more trigger tuning yet.
+
+Possible next steps:
+
+1. Add repeated-waypoint analysis to `analyze_episodes.py`.
+2. Add a prompt instruction asking the MLLM to avoid previous failed waypoints.
+3. Add a waypoint-quality check before accepting MLLM output.
+4. Compare generated waypoints against the map or path history.
+5. Inspect episode 9 visually to understand why the suggested waypoints do not help.
