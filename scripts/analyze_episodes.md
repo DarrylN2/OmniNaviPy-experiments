@@ -295,6 +295,36 @@ python3 scripts/analyze_episodes.py --mllm-only
 
 ---
 
+## Comparing trigger experiments
+
+This script is useful for comparing controlled MLLM trigger experiments.
+
+Example folders:
+
+```text
+Agent_DataMap__MLLM_None__small_10x1
+Agent_DataMap__MLLM_gemma3_27b__small_10x1
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+```
+
+A useful workflow is:
+
+```bash
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5 --mllm-only
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5 --failures-only
+```
+
+Important questions to check:
+
+- Did the failed episode become successful?
+- Did the final distance improve?
+- Did the MLLM get called earlier or more often?
+- Did the generated waypoints help, or did they make the episode worse?
+- Did any previously successful episodes fail after changing the trigger settings?
+
+---
+
 ## Possible future improvements
 
 Possible next steps include:

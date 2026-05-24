@@ -337,12 +337,37 @@ This is useful before making larger changes to the waypoint generation pipeline.
 
 ---
 
+## Recommended experiment naming
+
+For controlled experiments, it is useful to include important settings in the result folder name.
+
+Example:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+```
+
+This means:
+
+| Part | Meaning |
+|---|---|
+| `Agent_DataMap` | DataMap agent was used |
+| `MLLM_gemma3_27b` | gemma3:27b was used as the MLLM |
+| `small_10x1` | 10 trajectories from 1 difficulty |
+| `pt1` | `progress_threshold = 1` |
+| `wp4` | `waypoint_threshold = 4` |
+| `np5` | `n_points = 5` |
+
+This makes it easier to compare different MLLM trigger settings without overwriting old result folders.
+
+---
+
 ## Possible future improvements
 
 Some possible next improvements are:
 
-1. Add a per-episode CSV output where each row is one episode.
-2. Add final distance to target for failed episodes.
+1. Use `analyze_episodes.py` for deeper per-episode CSV output and failure analysis.
+2. Add final distance to target for failed episodes in the folder-level summary.
 3. Save generated waypoint coordinates in the CSV.
 4. Compare success rate for episodes with waypoints vs episodes without waypoints.
 5. Add command-line filters, such as only showing `DataMap` runs or only showing MLLM runs.
