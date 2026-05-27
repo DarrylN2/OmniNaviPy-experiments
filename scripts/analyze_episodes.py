@@ -196,6 +196,92 @@ def parse_strategy_from_response(response):
     return " ".join(match.group(1).strip().split())
 
 
+def analyze_waypoint_repetition(waypoints, near_threshold=3):
+    """
+    Analyze exact and near-repeated waypoints.
+
+    Exact repeat:
+    The same (x, y) waypoint appears more than once.
+
+    Near repeat:
+    A waypoint is within near_threshold meters of an earlier different waypoint.
+    """
+    if not waypoints:
+        return {
+            "n_unique_waypoints": 0,
+            "unique_waypoints": "",
+            "n_repeated_waypoints": 0,
+            "repeated_waypoints": "",
+            "has_repeated_waypoints": False,
+            "n_near_repeated_waypoints": 0,
+            "near_repeated_waypoints": "",
+            "has_near_repeated_waypoints": False,
+            "near_repeat_threshold": near_threshold,
+        }
+
+    # Count exact repeated waypoints.
+    counts = {}
+    for waypoint in waypoints:
+        counts[waypoint] = counts.get(waypoint, 0) + 1
+
+    unique_waypoints = list(counts.keys())
+
+    repeated_items = [
+        (waypoint, count)
+        for waypoint, count in counts.items()
+        if count > 1
+    ]
+
+    n_repeated_waypoints = sum(count - 1 for _, count in repeated_items)
+
+    repeated_waypoint_text = "; ".join(
+        f"({x}, {y}) x{count}"
+        for (x, y), count in repeated_items
+    )
+
+    unique_waypoint_text = "; ".join(
+        f"({x}, {y})"
+        for x, y in unique_waypoints
+    )
+
+    # Count near-repeated waypoints.
+    # A waypoint is near-repeated if it is close to an earlier different waypoint.
+    near_repeated = []
+
+    for idx, waypoint in enumerate(waypoints):
+        x, y = waypoint
+
+        for previous in waypoints[:idx]:
+            prev_x, prev_y = previous
+
+            # Exact repeats are already counted separately.
+            if waypoint == previous:
+                continue
+
+            distance = ((x - prev_x) ** 2 + (y - prev_y) ** 2) ** 0.5
+
+            if distance <= near_threshold:
+                near_repeated.append(waypoint)
+                break
+
+    near_repeated_waypoint_text = "; ".join(
+        f"({x}, {y})"
+        for x, y in near_repeated
+    )
+
+    return {
+        "n_unique_waypoints": len(unique_waypoints),
+        "unique_waypoints": unique_waypoint_text,
+        "n_repeated_waypoints": n_repeated_waypoints,
+        "repeated_waypoints": repeated_waypoint_text,
+        "has_repeated_waypoints": n_repeated_waypoints > 0,
+        "n_near_repeated_waypoints": len(near_repeated),
+        "near_repeated_waypoints": near_repeated_waypoint_text,
+        "has_near_repeated_waypoints": len(near_repeated) > 0,
+        "near_repeat_threshold": near_threshold,
+    }
+
+
 def get_mllm_info(episode):
     """
     Extract MLLM calls, generated waypoint coordinates, and strategy text.
@@ -297,6 +383,8 @@ def summarize_episode(result_folder_name, episode_id, episode):
     waypoint_text = "; ".join(f"({x}, {y})" for x, y in parsed_waypoints)
     strategy_text = " | ".join(mllm_info["strategies"])
 
+    waypoint_repetition = analyze_waypoint_repetition(parsed_waypoints)
+
     return {
         "run_folder": result_folder_name,
         "episode_id": episode_id,
@@ -312,6 +400,15 @@ def summarize_episode(result_folder_name, episode_id, episode):
         "n_waypoints_from_response": n_waypoints_from_response,
         "n_mllm_calls": mllm_info["n_mllm_calls"],
         "generated_waypoints": waypoint_text,
+        "n_unique_waypoints": waypoint_repetition["n_unique_waypoints"],
+        "unique_waypoints": waypoint_repetition["unique_waypoints"],
+        "n_repeated_waypoints": waypoint_repetition["n_repeated_waypoints"],
+        "repeated_waypoints": waypoint_repetition["repeated_waypoints"],
+        "has_repeated_waypoints": waypoint_repetition["has_repeated_waypoints"],
+        "n_near_repeated_waypoints": waypoint_repetition["n_near_repeated_waypoints"],
+        "near_repeated_waypoints": waypoint_repetition["near_repeated_waypoints"],
+        "has_near_repeated_waypoints": waypoint_repetition["has_near_repeated_waypoints"],
+        "near_repeat_threshold": waypoint_repetition["near_repeat_threshold"],
         "strategies": strategy_text,
         "final_distance_to_target": final_distance_to_target,
         "start_x": start_x,
@@ -373,6 +470,14 @@ def print_summary(rows):
     with_mllm_calls = sum(1 for row in rows if row["n_mllm_calls"] > 0)
     with_waypoints = sum(1 for row in rows if row["n_waypoints"] > 0)
 
+    with_repeated_waypoints = sum(
+        1 for row in rows if row.get("has_repeated_waypoints")
+    )
+
+    with_near_repeated_waypoints = sum(
+        1 for row in rows if row.get("has_near_repeated_waypoints")
+    )
+
     avg_steps_values = [
         row["n_steps"]
         for row in rows
@@ -406,6 +511,8 @@ def print_summary(rows):
     print(f"Success rate:                {round(100 * successes / total, 2)}%")
     print(f"Episodes with MLLM calls:    {with_mllm_calls}")
     print(f"Episodes with waypoints:     {with_waypoints}")
+    print(f"Episodes with repeated WPs:  {with_repeated_waypoints}")
+    print(f"Episodes with near repeats:  {with_near_repeated_waypoints}")
     print(f"Average steps:               {avg_steps}")
     print(f"Average final distance:      {avg_final_distance}")
     print()
@@ -426,10 +533,11 @@ def print_table(rows, max_rows=30):
         f"{'Steps':8} "
         f"{'MLLM':6} "
         f"{'WP':5} "
+        f"{'RepWP':6} "
         f"{'FinalDist':10}"
     )
 
-    print("-" * 120)
+    print("-" * 130)
 
     for row in rows[:max_rows]:
         print(
@@ -440,6 +548,7 @@ def print_table(rows, max_rows=30):
             f"{str(row['n_steps'])[:8]:8} "
             f"{str(row['n_mllm_calls'])[:6]:6} "
             f"{str(row['n_waypoints'])[:5]:5} "
+            f"{str(row.get('n_repeated_waypoints', 'N/A'))[:6]:6} "
             f"{str(row['final_distance_to_target'])[:10]:10}"
         )
 
@@ -470,6 +579,15 @@ def write_csv(rows, output_path):
         "n_waypoints_from_response",
         "n_mllm_calls",
         "generated_waypoints",
+        "n_unique_waypoints",
+        "unique_waypoints",
+        "n_repeated_waypoints",
+        "repeated_waypoints",
+        "has_repeated_waypoints",
+        "n_near_repeated_waypoints",
+        "near_repeated_waypoints",
+        "has_near_repeated_waypoints",
+        "near_repeat_threshold",
         "strategies",
         "final_distance_to_target",
         "start_x",
