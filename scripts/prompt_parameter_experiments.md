@@ -9,10 +9,10 @@ The goal is to understand the AI-side behavior before changing the main navigati
 Current focus:
 
 ```text
-When should the MLLM be called?
+When should the MLLM be called, and can prompt changes improve the quality of generated waypoints?
 ```
 
-The easiest controlled experiment is changing the MLLM stuck-detection parameters instead of changing the model or prompt first.
+The initial controlled experiments changed the MLLM stuck-detection parameters. After those experiments showed that more MLLM calls did not improve success rate, the next experiment tested whether stronger prompt wording could reduce repeated waypoint suggestions.
 
 ---
 
@@ -79,7 +79,7 @@ If the output does not follow the expected format, the waypoint may not be parse
 
 ---
 
-## Relevant Trigger Parameters
+## Relevant Trigger and Prompt Parameters
 
 The high-level MLLM waypoint logic is controlled mainly by these parameters:
 
@@ -89,6 +89,7 @@ The high-level MLLM waypoint logic is controlled mainly by these parameters:
 | `waypoint_threshold` | Distance needed to consider a waypoint reached |
 | `n_points` | Number of recent path points used to check whether the drone is stuck |
 | `pause_after_waypoint` | Whether to pause MLLM checks after a waypoint is generated |
+| `avoid_repeat_waypoints` | Whether to add stronger prompt wording that discourages repeated waypoint suggestions |
 
 The stuck detector checks whether the drone has made enough progress toward the target over the last `n_points`.
 
@@ -98,6 +99,7 @@ In simple terms:
 - Lower `n_points` makes the MLLM check for stuck behavior earlier.
 - Higher `n_points` makes the MLLM wait longer before deciding the drone is stuck.
 - `pause_after_waypoint=True` helps avoid repeatedly calling the MLLM too quickly.
+- `avoid_repeat_waypoints=True` asks the MLLM to avoid previous failed waypoints and choose a substantially different waypoint.
 
 ---
 
@@ -280,10 +282,10 @@ Result:
 
 Episode-level observations:
 
-| Episode | Success | Termination | Steps | MLLM calls | Waypoints | Final distance |
-|---|---|---|---:|---:|---:|---:|
-| 5 | True | `goal_reached` | 24 | 3 | 3 | 8.0 |
-| 9 | False | `max_steps_exceeded` | 32 | 6 | 6 | 50.96 |
+| Episode | Success | Termination | Steps | MLLM calls | Waypoints | Repeated waypoints | Final distance |
+|---|---|---|---:|---:|---:|---:|---:|
+| 5 | True | `goal_reached` | 24 | 3 | 3 | 0 | 8.0 |
+| 9 | False | `max_steps_exceeded` | 32 | 6 | 6 | 4 | 50.96 |
 
 Comparison with default MLLM trigger:
 
@@ -333,6 +335,7 @@ termination = max_steps_exceeded
 steps = 32
 MLLM calls = 6
 waypoints = 6
+repeated waypoints = 4
 final distance = 50.96
 generated waypoints = (-20, 22); (-15, 20); (-20, 22); (-20, 22); (-20, 22); (-20, 22)
 ```
@@ -345,7 +348,7 @@ Reducing `n_points` from 8 to 5 caused the MLLM to trigger more often, but the e
 
 Interpretation:
 
-The problem may be waypoint quality rather than only stuck-detection timing. A future improvement could check for repeated waypoints or modify the prompt to ask for a substantially different waypoint when previous suggestions failed.
+The problem may be waypoint quality rather than only stuck-detection timing. This motivated adding repeated-waypoint analysis to `analyze_episodes.py` and testing a stronger anti-repeat prompt.
 
 ---
 
@@ -402,9 +405,9 @@ Result:
 
 Episode-level observation:
 
-| Episode | Success | Termination | Steps | MLLM calls | Waypoints | Final distance |
-|---|---|---|---:|---:|---:|---:|
-| 9 | False | `max_steps_exceeded` | 32 | 3 | 3 | 50.0 |
+| Episode | Success | Termination | Steps | MLLM calls | Waypoints | Repeated waypoints | Final distance |
+|---|---|---|---:|---:|---:|---:|---:|
+| 9 | False | `max_steps_exceeded` | 32 | 3 | 3 | 0 | 50.0 |
 
 Generated waypoints for episode 9:
 
@@ -430,35 +433,124 @@ The generated waypoint quality or the hard trajectory itself may need deeper ana
 
 ---
 
-## Comparison Across Trigger Experiments
+## Experiment 3: Anti-repeat Prompt
 
-| Setting | Accuracy | Episodes with MLLM calls | Total MLLM calls | Average steps | Episode 9 result |
-|---|---:|---:|---:|---:|---|
-| Default MLLM, `pt1_wp4_np8` | 90.0% | 1 | 3 | 8.4 | Failed |
-| Earlier trigger, `pt1_wp4_np5` | 90.0% | 2 | 9 | 9.7 | Failed |
-| Higher threshold, `pt3_wp4_np8` | 90.0% | 1 | 3 | 8.4 | Failed |
+Run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat
+```
+
+Settings:
+
+| Parameter | Value |
+|---|---|
+| `agent_type` | `DataMap` |
+| `mllm_model` | `gemma3:27b` |
+| `progress_threshold` | 1 |
+| `waypoint_threshold` | 4 |
+| `n_points` | 5 |
+| `pause_after_waypoint` | True |
+| `avoid_repeat_waypoints` | True |
+| `n_per_difficulty` | 10 |
+| `n_difficulties` | 1 |
+| `seed` | 777 |
+
+Code changes tested:
+
+- Added an optional `avoid_repeat_waypoints` flag to `HighLevelPolicy`.
+- Added stronger prompt wording asking the MLLM not to repeat or slightly modify previous attempted waypoints.
+- Changed waypoint setting to use `episode.add_waypoint(waypoint)` so generated waypoints are saved in `episode.waypoint_history`.
+
+Command:
+
+```bash
+python3 scripts/evaluate_navigation_mllm_trigger.py
+```
+
+Analysis commands:
+
+```bash
+python3 scripts/summarize_results.py
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat --mllm-only
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat --failures-only
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat --csv ignore/episode_summary_pt1_wp4_np5_avoidrepeat.csv
+```
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| Episodes with MLLM calls | 2 |
+| Episodes with waypoints | 2 |
+| Episodes with repeated waypoints | 0 |
+| Episodes with near repeats | 0 |
+| Average steps | 9.1 |
+| Average final distance | 11.23 |
+
+Episode-level observations:
+
+| Episode | Success | Termination | Steps | MLLM calls | Waypoints | Repeated waypoints | Final distance |
+|---|---|---|---:|---:|---:|---:|---:|
+| 5 | True | `goal_reached` | 18 | 3 | 3 | 0 | 16.03 |
+| 9 | False | `max_steps_exceeded` | 32 | 6 | 6 | 0 | 50.96 |
+
+Generated waypoints for episode 5:
+
+```text
+(25, 69); (33, 60); (10, 65)
+```
+
+Generated waypoints for episode 9:
+
+```text
+(-20, 22); (-20, 12); (-30, 30); (-40, 12); (-50, 15); (-60, 22)
+```
+
+Interpretation:
+
+The anti-repeat prompt successfully reduced exact repeated waypoint suggestions. In the previous `pt1_wp4_np5` run, episode 9 had 4 repeated waypoint occurrences. In this anti-repeat run, episode 9 had 0 repeated waypoint occurrences.
+
+However, episode 9 still failed with `max_steps_exceeded`, and the final distance stayed at 50.96.
+
+Conclusion:
+
+```text
+The prompt change improved waypoint diversity, but it did not improve navigation success.
+This suggests the next problem may be waypoint quality or waypoint reachability, not only repeated waypoint generation.
+```
+
+---
+
+## Comparison Across Experiments
+
+| Setting | Accuracy | Episodes with MLLM calls | Total MLLM calls | Repeated waypoint issue | Average steps | Episode 9 result |
+|---|---:|---:|---:|---|---:|---|
+| Default MLLM, `pt1_wp4_np8` | 90.0% | 1 | 3 | Low / not measured deeply | 8.4 | Failed |
+| Earlier trigger, `pt1_wp4_np5` | 90.0% | 2 | 9 | Episode 9 repeated waypoint 4 times | 9.7 | Failed |
+| Higher threshold, `pt3_wp4_np8` | 90.0% | 1 | 3 | No exact repeat, but similar direction | 8.4 | Failed |
+| Anti-repeat prompt, `pt1_wp4_np5__avoidrepeat` | 90.0% | 2 | 9 | Exact repeats reduced to 0 | 9.1 | Failed |
 
 Overall interpretation:
 
 Changing the trigger parameters changed how often the MLLM was called, but it did not improve the success rate.
 
-The `pt1_wp4_np5` setting caused more MLLM calls, but episode 9 still failed. The generated waypoints for episode 9 were repetitive:
+The anti-repeat prompt improved waypoint diversity, but it still did not solve episode 9.
 
-```text
-(-20, 22); (-15, 20); (-20, 22); (-20, 22); (-20, 22); (-20, 22)
-```
-
-This suggests that simply calling the MLLM more often is not enough.
-
-Main finding:
+Main findings:
 
 ```text
 More MLLM calls does not automatically mean better navigation.
+Reducing repeated waypoints does not automatically mean better navigation.
 ```
 
-The hard failure, episode 9, remains unsolved across the baseline MLLM run and both trigger-parameter experiments.
+The hard failure, episode 9, remains unsolved across the baseline MLLM run, trigger-parameter experiments, and anti-repeat prompt experiment.
 
-The results suggest that the issue may not only be when the MLLM is called. The generated waypoint quality may also need to be analyzed.
+The results suggest that the issue may not only be when the MLLM is called or whether it repeats waypoints. The generated waypoints may need to be evaluated for quality, reachability, and whether the low-level DQN policy can actually move toward them.
 
 ---
 
@@ -469,7 +561,7 @@ For controlled experiments, include the important parameter settings in the run 
 Example:
 
 ```text
-Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat
 ```
 
 Meaning:
@@ -482,6 +574,7 @@ Meaning:
 | `pt1` | `progress_threshold = 1` |
 | `wp4` | `waypoint_threshold = 4` |
 | `np5` | `n_points = 5` |
+| `avoidrepeat` | Prompt variant discouraging repeated waypoint suggestions |
 
 This helps avoid overwriting old result folders and makes experiment comparison easier.
 
@@ -518,6 +611,7 @@ Export summaries to CSV:
 ```bash
 python3 scripts/summarize_results.py --csv ignore/results_summary.csv
 python3 scripts/analyze_episodes.py --csv ignore/episode_summary.csv
+python3 scripts/analyze_episodes.py --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat --csv ignore/episode_summary_pt1_wp4_np5_avoidrepeat.csv
 ```
 
 The CSV files are saved under `ignore/`, so they are local analysis outputs and usually should not be committed.
@@ -526,12 +620,32 @@ The CSV files are saved under `ignore/`, so they are local analysis outputs and 
 
 ## Possible Next Directions
 
-Based on these experiments, the next useful direction is probably not more trigger tuning yet.
+Based on these experiments, the next useful direction is probably not more trigger tuning or simple anti-repeat prompt wording.
+
+Completed so far:
+
+1. Added repeated-waypoint analysis to `analyze_episodes.py`.
+2. Added a prompt instruction asking the MLLM to avoid previous failed waypoints.
+3. Confirmed that the anti-repeat prompt reduced exact repeated waypoints from 4 to 0 in episode 9.
+4. Confirmed that episode 9 still failed even with more diverse waypoints.
 
 Possible next steps:
 
-1. Add repeated-waypoint analysis to `analyze_episodes.py`.
-2. Add a prompt instruction asking the MLLM to avoid previous failed waypoints.
-3. Add a waypoint-quality check before accepting MLLM output.
-4. Compare generated waypoints against the map or path history.
-5. Inspect episode 9 visually to understand why the suggested waypoints do not help.
+1. Add waypoint-following analysis:
+   - Did the drone actually move closer to each generated waypoint after it was set?
+   - If not, the issue may be that the low-level DQN cannot reach the waypoint.
+2. Add waypoint-quality analysis:
+   - Is the waypoint closer to the target than the robot's current position?
+   - Is the waypoint too far away?
+   - Is the waypoint near obstacles or outside safe regions?
+3. Compare generated waypoints against path history:
+   - Did the waypoint send the robot back into an already failed area?
+   - Did the waypoint lead to a new region of the map?
+4. Inspect episode 9 visually:
+   - Open `image_display.png` or saved map images for the failed run.
+   - Check whether the generated waypoints are actually reasonable.
+5. Test a stronger prompt that asks the MLLM to explain why the waypoint is reachable, not only why it is different.
+6. Add a code-level waypoint filter:
+   - Reject exact repeated waypoints.
+   - Reject near-repeated waypoints.
+   - Reject waypoints that are too far from the current robot position.
