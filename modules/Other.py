@@ -95,6 +95,7 @@ class HighLevelPolicy(Other):
         generate_waypoints=True,
         pause_after_waypoint=True,
         avoid_repeat_waypoints=False,
+        obstruction_aware_waypoints=False,
         x_min=None,
         x_max=None,
         y_min=None,
@@ -124,6 +125,7 @@ class HighLevelPolicy(Other):
         self.generate_waypoints = generate_waypoints
         self.pause_after_waypoint = pause_after_waypoint
         self.avoid_repeat_waypoints = avoid_repeat_waypoints
+        self.obstruction_aware_waypoints = obstruction_aware_waypoints
         self.progress_threshold = progress_threshold
         self.waypoint_threshold = waypoint_threshold
         self.n_points = n_points
@@ -405,6 +407,18 @@ class HighLevelPolicy(Other):
                     'A substantially different waypoint should be in a different area of the map, not just a few meters away from an old waypoint. '
                 )
 
+            if self.obstruction_aware_waypoints:
+                prompt_str += (
+                    "The waypoint should be an immediately reachable subgoal from the robot's current position, "
+                    "not necessarily the final best location. "
+                    "Before choosing the waypoint, consider whether the robot can reach it without being blocked by white obstacle pixels. "
+                    "If the direct path to the target is blocked, choose a nearby safe waypoint that helps the robot move around the obstacle. "
+                    "Prefer the closest safe waypoint that creates a better angle around the obstacle while still making reasonable progress toward the target. "
+                    "Only move sideways or slightly away from the target if necessary, and use the smallest detour needed. "
+                    "Do not choose a waypoint that sends the robot far away from the target or causes it to wander around the obstacle. "
+                    "Avoid waypoints that are behind a wall, inside an obstacle, too close to white obstacle pixels, repeated, or only globally closer to the target but locally unreachable. "
+                )
+
             if self.chain_of_thought:
                 prompt_str += f'Your previously output strategy reasoning for why previous waypoints were generated are:  ['
                 for i in range(len(self.strategy_history)):
@@ -448,6 +462,18 @@ class HighLevelPolicy(Other):
                     'Do not repeat or slightly modify any previous attempted waypoint. '
                     'The previous waypoints did not solve the problem, so choose a substantially different safe waypoint. '
                     'A substantially different waypoint should be in a different area of the map, not just a few meters away from an old waypoint. '
+                )
+
+            if self.obstruction_aware_waypoints:
+                prompt_str += (
+                    "The waypoint should be an immediately reachable subgoal from the robot's current position, "
+                    "not necessarily the final best location. "
+                    "Before choosing the waypoint, consider whether the robot can reach it without being blocked by white obstacle pixels. "
+                    "If the direct path to the target is blocked, choose a nearby safe waypoint that helps the robot move around the obstacle. "
+                    "Prefer the closest safe waypoint that creates a better angle around the obstacle while still making reasonable progress toward the target. "
+                    "Only move sideways or slightly away from the target if necessary, and use the smallest detour needed. "
+                    "Do not choose a waypoint that sends the robot far away from the target or causes it to wander around the obstacle. "
+                    "Avoid waypoints that are behind a wall, inside an obstacle, too close to white obstacle pixels, repeated, or only globally closer to the target but locally unreachable. "
                 )
 
             if self.include_map:
