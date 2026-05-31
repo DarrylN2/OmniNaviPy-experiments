@@ -6,6 +6,8 @@ from pathlib import Path
 
 
 DEFAULT_RESULTS_DIR = Path("ignore/results")
+DEFAULT_WAYPOINT_THRESHOLD = 4
+DEFAULT_NEAR_REPEAT_THRESHOLD = 3
 
 
 def parse_folder_name(folder_name):
@@ -33,7 +35,8 @@ def parse_folder_name(folder_name):
         else:
             extra_parts.append(part)
 
-    label = "__".join(extra_parts) if extra_parts else "N/A"
+    label = "__join__".join(extra_parts) if extra_parts else "N/A"
+    label = label.replace("__join__", "__")
 
     return agent, mllm, label
 
@@ -96,9 +99,19 @@ def get_value(obj, possible_names):
     return None
 
 
+def safe_round(value, digits=2):
+    """
+    Round numeric values while keeping N/A strings unchanged.
+    """
+    if isinstance(value, (int, float)):
+        return round(value, digits)
+
+    return value
+
+
 def get_point_coords(point):
     """
-    Return x, y, z from a point-like object or dictionary.
+    Return x, y, z from a point-like object, tuple/list, or dictionary.
     """
     if point is None:
         return "N/A", "N/A", "N/A"
@@ -110,11 +123,25 @@ def get_point_coords(point):
             point.get("z", "N/A"),
         )
 
+    if isinstance(point, (tuple, list)):
+        x = point[0] if len(point) > 0 else "N/A"
+        y = point[1] if len(point) > 1 else "N/A"
+        z = point[2] if len(point) > 2 else 0
+        return x, y, z
+
     x = getattr(point, "x", "N/A")
     y = getattr(point, "y", "N/A")
     z = getattr(point, "z", "N/A")
 
     return x, y, z
+
+
+def get_point_xy(point):
+    """
+    Return x, y from a point-like object, tuple/list, or dictionary.
+    """
+    x, y, _ = get_point_coords(point)
+    return x, y
 
 
 def calculate_distance(point_a, point_b):
@@ -123,6 +150,9 @@ def calculate_distance(point_a, point_b):
 
     If the project's Point.distance() method exists, use it.
     Otherwise, calculate Euclidean distance from x, y, z.
+
+    Note:
+    OmniNaviPy Point.distance() defaults to 2D distance unless xyz=True is passed.
     """
     if point_a is None or point_b is None:
         return "N/A"
@@ -141,6 +171,28 @@ def calculate_distance(point_a, point_b):
         bx, by, bz = float(bx), float(by), float(bz)
 
         distance = ((ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2) ** 0.5
+        return round(distance, 2)
+    except Exception:
+        return "N/A"
+
+
+def calculate_xy_distance(point_a, point_b):
+    """
+    Calculate 2D x-y distance between point-like objects.
+
+    This is used for waypoint analysis because generated waypoints are x-y goals.
+    """
+    if point_a is None or point_b is None:
+        return "N/A"
+
+    try:
+        ax, ay = get_point_xy(point_a)
+        bx, by = get_point_xy(point_b)
+
+        ax, ay = float(ax), float(ay)
+        bx, by = float(bx), float(by)
+
+        distance = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
         return round(distance, 2)
     except Exception:
         return "N/A"
@@ -196,7 +248,7 @@ def parse_strategy_from_response(response):
     return " ".join(match.group(1).strip().split())
 
 
-def analyze_waypoint_repetition(waypoints, near_threshold=3):
+def analyze_waypoint_repetition(waypoints, near_threshold=DEFAULT_NEAR_REPEAT_THRESHOLD):
     """
     Analyze exact and near-repeated waypoints.
 
@@ -219,7 +271,6 @@ def analyze_waypoint_repetition(waypoints, near_threshold=3):
             "near_repeat_threshold": near_threshold,
         }
 
-    # Count exact repeated waypoints.
     counts = {}
     for waypoint in waypoints:
         counts[waypoint] = counts.get(waypoint, 0) + 1
@@ -244,8 +295,6 @@ def analyze_waypoint_repetition(waypoints, near_threshold=3):
         for x, y in unique_waypoints
     )
 
-    # Count near-repeated waypoints.
-    # A waypoint is near-repeated if it is close to an earlier different waypoint.
     near_repeated = []
 
     for idx, waypoint in enumerate(waypoints):
@@ -254,7 +303,6 @@ def analyze_waypoint_repetition(waypoints, near_threshold=3):
         for previous in waypoints[:idx]:
             prev_x, prev_y = previous
 
-            # Exact repeats are already counted separately.
             if waypoint == previous:
                 continue
 
@@ -282,14 +330,40 @@ def analyze_waypoint_repetition(waypoints, near_threshold=3):
     }
 
 
+def state_idx_to_path_idx(state_idx, path_history):
+    """
+    Approximate which path_history index corresponds to an episode state index.
+
+    Episode.states starts with one initial state before stepping.
+    During each environment step, episode.new_step() appends a state and
+    episode.add_point() appends a path point.
+
+    Therefore:
+    state index 1 usually corresponds to path_history index 0.
+    state index 2 usually corresponds to path_history index 1.
+    """
+    if not path_history:
+        return None
+
+    try:
+        path_idx = int(state_idx) - 1
+        path_idx = max(0, path_idx)
+        path_idx = min(path_idx, len(path_history) - 1)
+        return path_idx
+    except Exception:
+        return None
+
+
 def get_mllm_info(episode):
     """
-    Extract MLLM calls, generated waypoint coordinates, and strategy text.
+    Extract MLLM calls, generated waypoint coordinates, strategy text,
+    and approximate generation step information.
 
-    In the current project, HighLevelPolicy stores MLLM responses in:
+    In the current project, HighLevelPolicy stores the MLLM response in:
     episode.states[*]["high_level_policy_response"]
     """
     states = get_value(episode, ["states"])
+    path_history = get_value(episode, ["path_history"]) or []
 
     if not states:
         return {
@@ -297,15 +371,17 @@ def get_mllm_info(episode):
             "parsed_waypoints": [],
             "strategies": [],
             "last_response": "",
+            "waypoint_records": [],
         }
 
     n_mllm_calls = 0
     parsed_waypoints = []
     strategies = []
+    waypoint_records = []
     last_response = ""
 
     try:
-        for state in states:
+        for state_idx, state in enumerate(states):
             if not isinstance(state, dict):
                 continue
 
@@ -318,9 +394,22 @@ def get_mllm_info(episode):
 
             waypoint = parse_waypoint_from_response(response)
             strategy = parse_strategy_from_response(response)
+            generation_path_idx = state_idx_to_path_idx(state_idx, path_history)
 
             if waypoint is not None:
                 parsed_waypoints.append(waypoint)
+
+                waypoint_records.append(
+                    {
+                        "waypoint_index": len(parsed_waypoints),
+                        "call_index": n_mllm_calls,
+                        "state_idx": state_idx,
+                        "generation_path_idx": generation_path_idx,
+                        "waypoint": waypoint,
+                        "strategy": strategy,
+                        "response": response,
+                    }
+                )
 
             if strategy:
                 strategies.append(strategy)
@@ -333,10 +422,272 @@ def get_mllm_info(episode):
         "parsed_waypoints": parsed_waypoints,
         "strategies": strategies,
         "last_response": last_response,
+        "waypoint_records": waypoint_records,
     }
 
 
-def summarize_episode(result_folder_name, episode_id, episode):
+def get_segment(path_history, start_idx, end_idx):
+    """
+    Safely slice path_history using inclusive end_idx.
+    """
+    if not path_history:
+        return []
+
+    start_idx = max(0, min(start_idx, len(path_history) - 1))
+    end_idx = max(0, min(end_idx, len(path_history) - 1))
+
+    if end_idx < start_idx:
+        end_idx = start_idx
+
+    return path_history[start_idx:end_idx + 1]
+
+
+def min_distance_to_point(path_segment, point):
+    """
+    Return the minimum 2D distance from any path point in the segment to point.
+    Also return the local segment index and the actual point.
+    """
+    if not path_segment:
+        return "N/A", None, None
+
+    best_distance = None
+    best_local_idx = None
+    best_point = None
+
+    for idx, path_point in enumerate(path_segment):
+        distance = calculate_xy_distance(path_point, point)
+
+        if not isinstance(distance, (int, float)):
+            continue
+
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_local_idx = idx
+            best_point = path_point
+
+    if best_distance is None:
+        return "N/A", None, None
+
+    return round(best_distance, 2), best_local_idx, best_point
+
+
+def min_distance_to_target(path_segment, target_point):
+    """
+    Return the minimum 2D distance from any path point in the segment to target.
+    """
+    if target_point is None or not path_segment:
+        return "N/A", None, None
+
+    return min_distance_to_point(path_segment, target_point)
+
+
+def analyze_waypoint_outcomes(
+    episode,
+    waypoint_records,
+    waypoint_threshold=DEFAULT_WAYPOINT_THRESHOLD,
+):
+    """
+    Analyze whether each generated waypoint was followed or useful.
+
+    For each waypoint, this estimates:
+    - where in the path the waypoint was generated
+    - the closest the robot got to the waypoint afterward
+    - whether the waypoint was reached using waypoint_threshold
+    - whether target distance improved after the waypoint
+
+    Note:
+    This uses path_history and states, so the generation step is approximate.
+    It is still useful for comparing runs and spotting unreachable/bad waypoints.
+    """
+    path_history = get_value(episode, ["path_history"]) or []
+    target_point = get_value(episode, ["target_point"])
+
+    if not waypoint_records or not path_history:
+        return []
+
+    outcomes = []
+
+    for idx, record in enumerate(waypoint_records):
+        waypoint = record.get("waypoint")
+        generation_path_idx = record.get("generation_path_idx")
+
+        if generation_path_idx is None:
+            generation_path_idx = 0
+
+        next_generation_path_idx = None
+        if idx + 1 < len(waypoint_records):
+            next_generation_path_idx = waypoint_records[idx + 1].get("generation_path_idx")
+
+        evaluation_start_idx = min(generation_path_idx + 1, len(path_history) - 1)
+
+        if next_generation_path_idx is None:
+            evaluation_end_idx = len(path_history) - 1
+        else:
+            evaluation_end_idx = max(evaluation_start_idx, next_generation_path_idx)
+
+        path_segment = get_segment(path_history, evaluation_start_idx, evaluation_end_idx)
+
+        point_at_generation = path_history[generation_path_idx]
+        final_segment_point = path_segment[-1] if path_segment else path_history[-1]
+
+        distance_to_waypoint_at_generation = calculate_xy_distance(point_at_generation, waypoint)
+
+        min_wp_distance, min_wp_local_idx, _ = min_distance_to_point(
+            path_segment,
+            waypoint,
+        )
+
+        if min_wp_local_idx is None:
+            step_min_distance_to_waypoint = "N/A"
+        else:
+            step_min_distance_to_waypoint = evaluation_start_idx + min_wp_local_idx
+
+        final_distance_to_waypoint = calculate_xy_distance(final_segment_point, waypoint)
+
+        waypoint_reached = (
+            min_wp_distance <= waypoint_threshold
+            if isinstance(min_wp_distance, (int, float))
+            else False
+        )
+
+        target_distance_at_generation = calculate_xy_distance(point_at_generation, target_point)
+        min_target_distance, _, _ = min_distance_to_target(
+            path_segment,
+            target_point,
+        )
+        final_target_distance = calculate_xy_distance(final_segment_point, target_point)
+        waypoint_distance_to_target = calculate_xy_distance(waypoint, target_point)
+
+        if isinstance(target_distance_at_generation, (int, float)) and isinstance(min_target_distance, (int, float)):
+            target_progress_best = round(target_distance_at_generation - min_target_distance, 2)
+        else:
+            target_progress_best = "N/A"
+
+        if isinstance(target_distance_at_generation, (int, float)) and isinstance(final_target_distance, (int, float)):
+            target_progress_final = round(target_distance_at_generation - final_target_distance, 2)
+        else:
+            target_progress_final = "N/A"
+
+        if isinstance(target_distance_at_generation, (int, float)) and isinstance(waypoint_distance_to_target, (int, float)):
+            waypoint_closer_to_target_than_robot = waypoint_distance_to_target < target_distance_at_generation
+        else:
+            waypoint_closer_to_target_than_robot = "N/A"
+
+        waypoint_x, waypoint_y = waypoint
+
+        outcomes.append(
+            {
+                "waypoint_index": record.get("waypoint_index"),
+                "call_index": record.get("call_index"),
+                "state_idx": record.get("state_idx"),
+                "generation_path_idx": generation_path_idx,
+                "evaluation_start_path_idx": evaluation_start_idx,
+                "evaluation_end_path_idx": evaluation_end_idx,
+                "waypoint_x": waypoint_x,
+                "waypoint_y": waypoint_y,
+                "distance_to_waypoint_at_generation": safe_round(distance_to_waypoint_at_generation),
+                "min_distance_to_waypoint_after_generation": safe_round(min_wp_distance),
+                "step_min_distance_to_waypoint": step_min_distance_to_waypoint,
+                "final_distance_to_waypoint_before_next_waypoint_or_end": safe_round(final_distance_to_waypoint),
+                "waypoint_reached": waypoint_reached,
+                "waypoint_threshold": waypoint_threshold,
+                "target_distance_at_generation": safe_round(target_distance_at_generation),
+                "min_target_distance_after_generation": safe_round(min_target_distance),
+                "final_target_distance_before_next_waypoint_or_end": safe_round(final_target_distance),
+                "target_progress_best_after_waypoint": safe_round(target_progress_best),
+                "target_progress_final_after_waypoint": safe_round(target_progress_final),
+                "waypoint_distance_to_target": safe_round(waypoint_distance_to_target),
+                "waypoint_closer_to_target_than_robot": waypoint_closer_to_target_than_robot,
+                "strategy": record.get("strategy", ""),
+            }
+        )
+
+    return outcomes
+
+
+def summarize_waypoint_outcomes(waypoint_outcomes):
+    """
+    Convert detailed waypoint outcome rows into episode-level summary metrics.
+    """
+    if not waypoint_outcomes:
+        return {
+            "n_waypoints_reached": 0,
+            "n_waypoints_not_reached": 0,
+            "waypoint_reach_rate": "N/A",
+            "avg_min_distance_to_waypoint": "N/A",
+            "n_waypoints_with_positive_target_progress_best": 0,
+            "n_waypoints_with_positive_target_progress_final": 0,
+            "n_waypoints_closer_to_target_than_robot": 0,
+            "waypoint_outcomes": "",
+        }
+
+    n_waypoints = len(waypoint_outcomes)
+    n_reached = sum(1 for item in waypoint_outcomes if item["waypoint_reached"])
+    n_not_reached = n_waypoints - n_reached
+
+    min_distances = [
+        item["min_distance_to_waypoint_after_generation"]
+        for item in waypoint_outcomes
+        if isinstance(item["min_distance_to_waypoint_after_generation"], (int, float))
+    ]
+
+    avg_min_distance = (
+        round(sum(min_distances) / len(min_distances), 2)
+        if min_distances
+        else "N/A"
+    )
+
+    n_positive_best = sum(
+        1
+        for item in waypoint_outcomes
+        if isinstance(item["target_progress_best_after_waypoint"], (int, float))
+        and item["target_progress_best_after_waypoint"] > 0
+    )
+
+    n_positive_final = sum(
+        1
+        for item in waypoint_outcomes
+        if isinstance(item["target_progress_final_after_waypoint"], (int, float))
+        and item["target_progress_final_after_waypoint"] > 0
+    )
+
+    n_closer_to_target = sum(
+        1
+        for item in waypoint_outcomes
+        if item["waypoint_closer_to_target_than_robot"] is True
+    )
+
+    waypoint_outcome_text = "; ".join(
+        (
+            f"WP{item['waypoint_index']}=({item['waypoint_x']}, {item['waypoint_y']}) "
+            f"gen_step={item['generation_path_idx']} "
+            f"min_wp_dist={item['min_distance_to_waypoint_after_generation']} "
+            f"reached={item['waypoint_reached']} "
+            f"target_prog_best={item['target_progress_best_after_waypoint']} "
+            f"target_prog_final={item['target_progress_final_after_waypoint']}"
+        )
+        for item in waypoint_outcomes
+    )
+
+    return {
+        "n_waypoints_reached": n_reached,
+        "n_waypoints_not_reached": n_not_reached,
+        "waypoint_reach_rate": round(100 * n_reached / n_waypoints, 2),
+        "avg_min_distance_to_waypoint": avg_min_distance,
+        "n_waypoints_with_positive_target_progress_best": n_positive_best,
+        "n_waypoints_with_positive_target_progress_final": n_positive_final,
+        "n_waypoints_closer_to_target_than_robot": n_closer_to_target,
+        "waypoint_outcomes": waypoint_outcome_text,
+    }
+
+
+def summarize_episode(
+    result_folder_name,
+    episode_id,
+    episode,
+    waypoint_threshold=DEFAULT_WAYPOINT_THRESHOLD,
+    near_threshold=DEFAULT_NEAR_REPEAT_THRESHOLD,
+):
     """
     Create one CSV row for one episode.
     """
@@ -363,7 +714,6 @@ def summarize_episode(result_folder_name, episode_id, episode):
     parsed_waypoints = mllm_info["parsed_waypoints"]
     n_waypoints_from_response = len(parsed_waypoints)
 
-    # Use the larger count because waypoint_history may not always be updated.
     n_waypoints = max(n_waypoints_from_history, n_waypoints_from_response)
 
     start_point = get_value(episode, ["start_point"])
@@ -383,7 +733,17 @@ def summarize_episode(result_folder_name, episode_id, episode):
     waypoint_text = "; ".join(f"({x}, {y})" for x, y in parsed_waypoints)
     strategy_text = " | ".join(mllm_info["strategies"])
 
-    waypoint_repetition = analyze_waypoint_repetition(parsed_waypoints)
+    waypoint_repetition = analyze_waypoint_repetition(
+        parsed_waypoints,
+        near_threshold=near_threshold,
+    )
+
+    waypoint_outcomes = analyze_waypoint_outcomes(
+        episode,
+        mllm_info["waypoint_records"],
+        waypoint_threshold=waypoint_threshold,
+    )
+    waypoint_outcome_summary = summarize_waypoint_outcomes(waypoint_outcomes)
 
     return {
         "run_folder": result_folder_name,
@@ -409,6 +769,14 @@ def summarize_episode(result_folder_name, episode_id, episode):
         "near_repeated_waypoints": waypoint_repetition["near_repeated_waypoints"],
         "has_near_repeated_waypoints": waypoint_repetition["has_near_repeated_waypoints"],
         "near_repeat_threshold": waypoint_repetition["near_repeat_threshold"],
+        "n_waypoints_reached": waypoint_outcome_summary["n_waypoints_reached"],
+        "n_waypoints_not_reached": waypoint_outcome_summary["n_waypoints_not_reached"],
+        "waypoint_reach_rate": waypoint_outcome_summary["waypoint_reach_rate"],
+        "avg_min_distance_to_waypoint": waypoint_outcome_summary["avg_min_distance_to_waypoint"],
+        "n_waypoints_with_positive_target_progress_best": waypoint_outcome_summary["n_waypoints_with_positive_target_progress_best"],
+        "n_waypoints_with_positive_target_progress_final": waypoint_outcome_summary["n_waypoints_with_positive_target_progress_final"],
+        "n_waypoints_closer_to_target_than_robot": waypoint_outcome_summary["n_waypoints_closer_to_target_than_robot"],
+        "waypoint_outcomes": waypoint_outcome_summary["waypoint_outcomes"],
         "strategies": strategy_text,
         "final_distance_to_target": final_distance_to_target,
         "start_x": start_x,
@@ -420,14 +788,23 @@ def summarize_episode(result_folder_name, episode_id, episode):
         "target_x": target_x,
         "target_y": target_y,
         "target_z": target_z,
+        "_waypoint_outcome_rows": waypoint_outcomes,
     }
 
 
-def analyze_results(results_dir, run_folder=None, failures_only=False, mllm_only=False):
+def analyze_results(
+    results_dir,
+    run_folder=None,
+    failures_only=False,
+    mllm_only=False,
+    waypoint_threshold=DEFAULT_WAYPOINT_THRESHOLD,
+    near_threshold=DEFAULT_NEAR_REPEAT_THRESHOLD,
+):
     """
     Analyze all episodes in all result folders.
     """
     rows = []
+    waypoint_rows = []
 
     for result_folder in sorted(results_dir.iterdir()):
         if not result_folder.is_dir():
@@ -443,7 +820,13 @@ def analyze_results(results_dir, run_folder=None, failures_only=False, mllm_only
             continue
 
         for episode_id, episode in get_episode_items(episodes):
-            row = summarize_episode(result_folder.name, episode_id, episode)
+            row = summarize_episode(
+                result_folder.name,
+                episode_id,
+                episode,
+                waypoint_threshold=waypoint_threshold,
+                near_threshold=near_threshold,
+            )
 
             if failures_only and row["success"]:
                 continue
@@ -451,9 +834,21 @@ def analyze_results(results_dir, run_folder=None, failures_only=False, mllm_only
             if mllm_only and row["n_mllm_calls"] == 0:
                 continue
 
+            detailed_outcomes = row.pop("_waypoint_outcome_rows", [])
+
             rows.append(row)
 
-    return rows
+            for outcome in detailed_outcomes:
+                waypoint_row = {
+                    "run_folder": result_folder.name,
+                    "episode_id": episode_id,
+                    "success": row["success"],
+                    "termination": row["termination"],
+                    **outcome,
+                }
+                waypoint_rows.append(waypoint_row)
+
+    return rows, waypoint_rows
 
 
 def print_summary(rows):
@@ -478,6 +873,18 @@ def print_summary(rows):
         1 for row in rows if row.get("has_near_repeated_waypoints")
     )
 
+    total_waypoints_reached = sum(
+        row["n_waypoints_reached"]
+        for row in rows
+        if isinstance(row["n_waypoints_reached"], int)
+    )
+
+    total_waypoints = sum(
+        row["n_waypoints"]
+        for row in rows
+        if isinstance(row["n_waypoints"], int)
+    )
+
     avg_steps_values = [
         row["n_steps"]
         for row in rows
@@ -488,6 +895,12 @@ def print_summary(rows):
         row["final_distance_to_target"]
         for row in rows
         if isinstance(row["final_distance_to_target"], (int, float))
+    ]
+
+    avg_min_wp_distance_values = [
+        row["avg_min_distance_to_waypoint"]
+        for row in rows
+        if isinstance(row["avg_min_distance_to_waypoint"], (int, float))
     ]
 
     avg_steps = (
@@ -502,6 +915,18 @@ def print_summary(rows):
         else "N/A"
     )
 
+    avg_min_wp_distance = (
+        round(sum(avg_min_wp_distance_values) / len(avg_min_wp_distance_values), 2)
+        if avg_min_wp_distance_values
+        else "N/A"
+    )
+
+    overall_waypoint_reach_rate = (
+        round(100 * total_waypoints_reached / total_waypoints, 2)
+        if total_waypoints
+        else "N/A"
+    )
+
     print()
     print("Episode Analysis Summary")
     print("------------------------")
@@ -513,6 +938,9 @@ def print_summary(rows):
     print(f"Episodes with waypoints:     {with_waypoints}")
     print(f"Episodes with repeated WPs:  {with_repeated_waypoints}")
     print(f"Episodes with near repeats:  {with_near_repeated_waypoints}")
+    print(f"Waypoints reached:           {total_waypoints_reached}/{total_waypoints}")
+    print(f"Waypoint reach rate:         {overall_waypoint_reach_rate}%")
+    print(f"Average min WP distance:     {avg_min_wp_distance}")
     print(f"Average steps:               {avg_steps}")
     print(f"Average final distance:      {avg_final_distance}")
     print()
@@ -533,13 +961,17 @@ def print_table(rows, max_rows=30):
         f"{'Steps':8} "
         f"{'MLLM':6} "
         f"{'WP':5} "
+        f"{'WPReach':8} "
         f"{'RepWP':6} "
+        f"{'NearWP':7} "
+        f"{'AvgMinWP':9} "
         f"{'FinalDist':10}"
     )
 
-    print("-" * 130)
+    print("-" * 155)
 
     for row in rows[:max_rows]:
+        wp_reach_text = f"{row['n_waypoints_reached']}/{row['n_waypoints']}"
         print(
             f"{row['run_folder'][:45]:45} "
             f"{str(row['episode_id'])[:6]:6} "
@@ -548,7 +980,10 @@ def print_table(rows, max_rows=30):
             f"{str(row['n_steps'])[:8]:8} "
             f"{str(row['n_mllm_calls'])[:6]:6} "
             f"{str(row['n_waypoints'])[:5]:5} "
+            f"{wp_reach_text[:8]:8} "
             f"{str(row.get('n_repeated_waypoints', 'N/A'))[:6]:6} "
+            f"{str(row.get('n_near_repeated_waypoints', 'N/A'))[:7]:7} "
+            f"{str(row.get('avg_min_distance_to_waypoint', 'N/A'))[:9]:9} "
             f"{str(row['final_distance_to_target'])[:10]:10}"
         )
 
@@ -556,15 +991,52 @@ def print_table(rows, max_rows=30):
         print(f"... showing first {max_rows} of {len(rows)} episodes")
 
 
-def write_csv(rows, output_path):
+def print_waypoint_table(waypoint_rows, max_rows=40):
     """
-    Save episode analysis to CSV.
+    Print a compact per-waypoint table.
     """
-    if not rows:
-        print("No rows to write.")
+    if not waypoint_rows:
         return
 
-    fieldnames = [
+    print()
+    print("Waypoint Outcome Details")
+    print("------------------------")
+    print(
+        f"{'Run Folder':35} "
+        f"{'EpID':6} "
+        f"{'WP':4} "
+        f"{'Coord':14} "
+        f"{'GenStep':8} "
+        f"{'MinDist':8} "
+        f"{'Reached':8} "
+        f"{'BestProg':9} "
+        f"{'FinalProg':10}"
+    )
+    print("-" * 115)
+
+    for row in waypoint_rows[:max_rows]:
+        coord = f"({row['waypoint_x']}, {row['waypoint_y']})"
+        print(
+            f"{row['run_folder'][:35]:35} "
+            f"{str(row['episode_id'])[:6]:6} "
+            f"{str(row['waypoint_index'])[:4]:4} "
+            f"{coord[:14]:14} "
+            f"{str(row['generation_path_idx'])[:8]:8} "
+            f"{str(row['min_distance_to_waypoint_after_generation'])[:8]:8} "
+            f"{str(row['waypoint_reached'])[:8]:8} "
+            f"{str(row['target_progress_best_after_waypoint'])[:9]:9} "
+            f"{str(row['target_progress_final_after_waypoint'])[:10]:10}"
+        )
+
+    if len(waypoint_rows) > max_rows:
+        print(f"... showing first {max_rows} of {len(waypoint_rows)} waypoint rows")
+
+
+def get_episode_fieldnames():
+    """
+    Field order for the per-episode CSV.
+    """
+    return [
         "run_folder",
         "episode_id",
         "agent",
@@ -588,6 +1060,14 @@ def write_csv(rows, output_path):
         "near_repeated_waypoints",
         "has_near_repeated_waypoints",
         "near_repeat_threshold",
+        "n_waypoints_reached",
+        "n_waypoints_not_reached",
+        "waypoint_reach_rate",
+        "avg_min_distance_to_waypoint",
+        "n_waypoints_with_positive_target_progress_best",
+        "n_waypoints_with_positive_target_progress_final",
+        "n_waypoints_closer_to_target_than_robot",
+        "waypoint_outcomes",
         "strategies",
         "final_distance_to_target",
         "start_x",
@@ -601,6 +1081,51 @@ def write_csv(rows, output_path):
         "target_z",
     ]
 
+
+def get_waypoint_fieldnames():
+    """
+    Field order for the per-waypoint CSV.
+    """
+    return [
+        "run_folder",
+        "episode_id",
+        "success",
+        "termination",
+        "waypoint_index",
+        "call_index",
+        "state_idx",
+        "generation_path_idx",
+        "evaluation_start_path_idx",
+        "evaluation_end_path_idx",
+        "waypoint_x",
+        "waypoint_y",
+        "distance_to_waypoint_at_generation",
+        "min_distance_to_waypoint_after_generation",
+        "step_min_distance_to_waypoint",
+        "final_distance_to_waypoint_before_next_waypoint_or_end",
+        "waypoint_reached",
+        "waypoint_threshold",
+        "target_distance_at_generation",
+        "min_target_distance_after_generation",
+        "final_target_distance_before_next_waypoint_or_end",
+        "target_progress_best_after_waypoint",
+        "target_progress_final_after_waypoint",
+        "waypoint_distance_to_target",
+        "waypoint_closer_to_target_than_robot",
+        "strategy",
+    ]
+
+
+def write_csv(rows, output_path):
+    """
+    Save episode analysis to CSV.
+    """
+    if not rows:
+        print("No rows to write.")
+        return
+
+    fieldnames = get_episode_fieldnames()
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w", newline="") as f:
@@ -609,6 +1134,26 @@ def write_csv(rows, output_path):
         writer.writerows(rows)
 
     print(f"Saved episode analysis CSV to: {output_path}")
+
+
+def write_waypoint_csv(waypoint_rows, output_path):
+    """
+    Save detailed per-waypoint analysis to CSV.
+    """
+    if not waypoint_rows:
+        print("No waypoint rows to write.")
+        return
+
+    fieldnames = get_waypoint_fieldnames()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(waypoint_rows)
+
+    print(f"Saved waypoint analysis CSV to: {output_path}")
 
 
 def main():
@@ -638,6 +1183,13 @@ def main():
     )
 
     parser.add_argument(
+        "--waypoint-csv",
+        type=Path,
+        default=None,
+        help="Optional path to save per-waypoint outcome analysis as a CSV file.",
+    )
+
+    parser.add_argument(
         "--failures-only",
         action="store_true",
         help="Only show failed episodes.",
@@ -650,10 +1202,37 @@ def main():
     )
 
     parser.add_argument(
+        "--waypoint-threshold",
+        type=float,
+        default=DEFAULT_WAYPOINT_THRESHOLD,
+        help="Distance threshold used to count a generated waypoint as reached.",
+    )
+
+    parser.add_argument(
+        "--near-threshold",
+        type=float,
+        default=DEFAULT_NEAR_REPEAT_THRESHOLD,
+        help="Distance threshold used to count near-repeated waypoints.",
+    )
+
+    parser.add_argument(
         "--max-rows",
         type=int,
         default=30,
         help="Maximum number of episode rows to print in the terminal.",
+    )
+
+    parser.add_argument(
+        "--max-waypoint-rows",
+        type=int,
+        default=40,
+        help="Maximum number of waypoint rows to print in the terminal.",
+    )
+
+    parser.add_argument(
+        "--show-waypoints",
+        action="store_true",
+        help="Print a detailed per-waypoint outcome table.",
     )
 
     args = parser.parse_args()
@@ -666,18 +1245,26 @@ def main():
         print(f"Results path is not a folder: {args.results_dir}")
         return
 
-    rows = analyze_results(
+    rows, waypoint_rows = analyze_results(
         args.results_dir,
         run_folder=args.run_folder,
         failures_only=args.failures_only,
         mllm_only=args.mllm_only,
+        waypoint_threshold=args.waypoint_threshold,
+        near_threshold=args.near_threshold,
     )
 
     print_summary(rows)
     print_table(rows, max_rows=args.max_rows)
 
+    if args.show_waypoints:
+        print_waypoint_table(waypoint_rows, max_rows=args.max_waypoint_rows)
+
     if args.csv:
         write_csv(rows, args.csv)
+
+    if args.waypoint_csv:
+        write_waypoint_csv(waypoint_rows, args.waypoint_csv)
 
 
 if __name__ == "__main__":

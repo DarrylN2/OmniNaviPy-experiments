@@ -727,7 +727,42 @@ Conclusion:
 The balanced obstruction-aware prompt was better than the stronger obstruction-aware prompt, but it still did not solve episode 9.
 This suggests prompt-only changes can influence waypoint behavior, but they may not be enough for the hardest failure case.
 ```
+### Waypoint-following analysis for balanced obstruction-aware prompt
 
+The upgraded `analyze_episodes.py` measured whether the drone actually moved close to each generated waypoint after it was created.
+
+For the balanced obstruction-aware run:
+
+| Episode | Result | Waypoints reached | Avg min distance to waypoint | Final distance |
+|---|---|---:|---:|---:|
+| 5 | Success | 3/3 | 1.67 | 8.06 |
+| 9 | Failure | 1/6 | 9.56 | 53.31 |
+
+Episode 5 reached all generated waypoints and successfully reached the goal. This suggests the balanced prompt produced useful stepping-stone waypoints for this episode.
+
+Episode 9 only reached 1 out of 6 generated waypoints. Most generated waypoints had weak, zero, or negative target progress after generation.
+
+Detailed waypoint outcomes for episode 9:
+
+| Waypoint | Min distance to waypoint | Reached? | Best target progress | Final target progress |
+|---|---:|---|---:|---:|
+| WP1 `(-14, 20)` | 3.61 | True | 0.0 | 0.0 |
+| WP2 `(-20, 15)` | 11.4 | False | 0.0 | 0.0 |
+| WP3 `(-25, 22)` | 14.0 | False | 0.0 | -1.93 |
+| WP4 `(-15, 28)` | 6.08 | False | -0.27 | -2.47 |
+| WP5 `(-18, 28)` | 7.07 | False | 2.05 | 2.05 |
+| WP6 `(-25, 35)` | 15.23 | False | 0.0 | 0.0 |
+
+Interpretation:
+
+Episode 9 is not only failing because of repeated waypoint generation. The harder issue is likely waypoint reachability or the DQN policy's ability to execute the waypoint. The MLLM generated diverse waypoints, but the drone mostly did not get close enough to them.
+
+Conclusion:
+
+```text
+The balanced obstruction-aware prompt can produce useful waypoints in some cases, as shown by episode 5.
+However, episode 9 still failed because only 1 out of 6 generated waypoints was reached.
+This suggests the next step should focus on waypoint reachability or waypoint-aware stuck detection, not only more prompt wording.
 
 ## Comparison Across Experiments
 
