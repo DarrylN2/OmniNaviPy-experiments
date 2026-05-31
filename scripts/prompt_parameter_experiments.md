@@ -528,8 +528,6 @@ This suggests the next problem may be waypoint quality or waypoint reachability,
 
 ---
 
----
-
 ## Experiment 4: Obstruction-aware Prompt
 
 Run folder:
@@ -763,6 +761,7 @@ Conclusion:
 The balanced obstruction-aware prompt can produce useful waypoints in some cases, as shown by episode 5.
 However, episode 9 still failed because only 1 out of 6 generated waypoints was reached.
 This suggests the next step should focus on waypoint reachability or waypoint-aware stuck detection, not only more prompt wording.
+```
 
 ---
 
@@ -882,6 +881,256 @@ Changing stuck detection to measure progress toward the active waypoint did not 
 This suggests episode 9 is more likely limited by waypoint reachability or DQN execution, not only by the stuck-detection target.
 ```
 
+---
+
+## Experiment 7: Candidate Waypoint Selection
+
+Goal:
+
+Instead of allowing the MLLM to freely generate any `(x, y)` waypoint, this experiment constrains the MLLM to choose from nearby candidate waypoints generated around the robot.
+
+This was motivated by the waypoint-following analysis, which showed that episode 9 often failed because the drone did not reach most generated waypoints.
+
+Code changes tested:
+
+- Added optional candidate waypoint selection to `HighLevelPolicy`.
+- Generated nearby candidate waypoints around the robot using a fixed radius.
+- Added prompt instructions requiring the MLLM to choose only from the candidate waypoint list.
+- Rejected or snapped MLLM outputs that were not in the candidate list.
+- Tested candidate radii: `10`, `15`, and `20`.
+
+Shared settings:
+
+| Parameter | Value |
+|---|---|
+| `agent_type` | `DataMap` |
+| `mllm_model` | `gemma3:27b` |
+| `progress_threshold` | 1 |
+| `waypoint_threshold` | 4 |
+| `n_points` | 5 |
+| `pause_after_waypoint` | True |
+| `avoid_repeat_waypoints` | True |
+| `obstruction_aware_waypoints` | True |
+| `waypoint_aware_stuck_detection` | True |
+| `use_candidate_waypoints` | True |
+| `candidate_waypoint_snap_tolerance` | 2 |
+| `n_per_difficulty` | 10 |
+| `n_difficulties` | 1 |
+| `seed` | 777 |
+
+---
+
+### Experiment 7a: Candidate Waypoints, Radius 10
+
+Run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware__wpawarestuck__candidatewp_r10
+```
+
+Additional setting:
+
+| Parameter | Value |
+|---|---:|
+| `candidate_waypoint_radius` | 10 |
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 80.0% |
+| Episodes | 10 |
+| Successes | 8 |
+| Failures | 2 |
+| Episodes with MLLM calls | 2 |
+| Episodes with waypoints | 2 |
+| Episodes with repeated waypoints | 0 |
+| Episodes with near repeats | 1 |
+| Waypoints reached | 5/9 |
+| Waypoint reach rate | 55.56% |
+| Average min waypoint distance | 6.21 |
+| Average final distance for MLLM episodes | 27.92 |
+
+Episode-level observations:
+
+| Episode | Result | Termination | Steps | MLLM calls | Waypoints | Waypoints reached | Avg min distance to waypoint | Final distance |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 5 | Failure | `max_steps_exceeded` | 32 | 4 | 4 | 2/4 | 5.46 | 18.36 |
+| 9 | Failure | `max_steps_exceeded` | 32 | 5 | 5 | 3/5 | 6.97 | 37.48 |
+
+Interpretation:
+
+Radius 10 improved waypoint reachability for episode 9 compared to the previous waypoint-aware stuck experiment, increasing episode 9 waypoint reach from `1/6` to `3/5`.
+
+However, it also caused episode 5 to fail. This suggests radius 10 may be too local or restrictive. The drone can reach more nearby waypoints, but the waypoints may not move it toward the goal efficiently enough before max steps.
+
+Conclusion:
+
+```text
+Candidate waypoint radius 10 improved waypoint reachability but reduced overall accuracy from 90% to 80%.
+It helped episode 9 somewhat but introduced a new failure in episode 5.
+```
+
+---
+
+### Experiment 7b: Candidate Waypoints, Radius 15
+
+Run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware__wpawarestuck__candidatewp_r15
+```
+
+Additional setting:
+
+| Parameter | Value |
+|---|---:|
+| `candidate_waypoint_radius` | 15 |
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| Episodes with MLLM calls | 2 |
+| Episodes with waypoints | 2 |
+| Episodes with repeated waypoints | 0 |
+| Episodes with near repeats | 0 |
+| Waypoints reached | 2/5 |
+| Waypoint reach rate | 40.0% |
+| Average min waypoint distance | 7.09 |
+| Average final distance for MLLM episodes | 16.58 |
+
+Episode-level observations:
+
+| Episode | Result | Termination | Steps | MLLM calls | Waypoints | Waypoints reached | Avg min distance to waypoint | Final distance |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 5 | Success | `goal_reached` | 13 | 1 | 1 | 1/1 | 1.0 | 5.0 |
+| 9 | Failure | `max_steps_exceeded` | 32 | 4 | 4 | 1/4 | 13.19 | 28.16 |
+
+Generated waypoints for episode 9:
+
+```text
+(-11, 7); (-26, 24); (-26, 7); (-26, 37)
+```
+
+Detailed waypoint outcomes for episode 9:
+
+| Waypoint | Min distance to waypoint | Reached? | Best target progress | Final target progress |
+|---|---:|---|---:|---:|
+| WP1 `(-11, 7)` | 15.0 | False | 0.0 | -0.59 |
+| WP2 `(-26, 24)` | 15.13 | False | 0.59 | 0.59 |
+| WP3 `(-26, 7)` | 21.21 | False | 0.0 | 0.0 |
+| WP4 `(-26, 37)` | 1.41 | True | 22.8 | 22.8 |
+
+Interpretation:
+
+Radius 15 preserved 90% accuracy and improved episode 9 final distance compared to the previous waypoint-aware stuck experiment.
+
+Episode 9 still failed, but final distance improved from `55.01` to `28.16`. This is the best episode 9 final distance among the candidate waypoint radius experiments so far.
+
+Conclusion:
+
+```text
+Candidate waypoint radius 15 gave the best tradeoff.
+It preserved 90% accuracy, kept episode 5 successful, and improved episode 9 final distance substantially.
+```
+
+---
+
+### Experiment 7c: Candidate Waypoints, Radius 20
+
+Run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware__wpawarestuck__candidatewp_r20
+```
+
+Additional setting:
+
+| Parameter | Value |
+|---|---:|
+| `candidate_waypoint_radius` | 20 |
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| Episodes with MLLM calls | 2 |
+| Episodes with waypoints | 2 |
+| Episodes with repeated waypoints | 0 |
+| Episodes with near repeats | 0 |
+| Waypoints reached | 3/5 |
+| Waypoint reach rate | 60.0% |
+| Average min waypoint distance | 5.33 |
+| Average final distance for MLLM episodes | 23.76 |
+
+Episode-level observations:
+
+| Episode | Result | Termination | Steps | MLLM calls | Waypoints | Waypoints reached | Avg min distance to waypoint | Final distance |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 5 | Success | `goal_reached` | 13 | 1 | 1 | 1/1 | 0.0 | 5.0 |
+| 9 | Failure | `max_steps_exceeded` | 32 | 4 | 4 | 2/4 | 10.65 | 42.52 |
+
+Generated waypoints for episode 9:
+
+```text
+(-31, 22); (-11, 2); (-11, 42); (-28, 44)
+```
+
+Detailed waypoint outcomes for episode 9:
+
+| Waypoint | Min distance to waypoint | Reached? | Best target progress | Final target progress |
+|---|---:|---|---:|---:|
+| WP1 `(-31, 22)` | 20.0 | False | 0.0 | 0.0 |
+| WP2 `(-11, 2)` | 19.0 | False | 0.26 | 0.0 |
+| WP3 `(-11, 42)` | 3.61 | True | 0.0 | -12.29 |
+| WP4 `(-28, 44)` | 0.0 | True | 22.07 | 20.73 |
+
+Interpretation:
+
+Radius 20 preserved 90% accuracy and reached more episode 9 waypoints than radius 15. However, episode 9 final distance was worse than radius 15.
+
+This suggests that reaching more candidate waypoints is not enough by itself. The selected waypoints also need to move the drone in a useful direction toward the final target.
+
+Conclusion:
+
+```text
+Candidate waypoint radius 20 preserved overall accuracy but was worse than radius 15 for episode 9 final distance.
+```
+
+---
+
+### Candidate Waypoint Radius Comparison
+
+| Experiment | Accuracy | Episode 5 result | Episode 9 waypoints reached | Episode 9 final distance |
+|---|---:|---|---:|---:|
+| No candidate waypoint selection, waypoint-aware stuck | 90.0% | Success | 1/6 | 55.01 |
+| Candidate radius 10 | 80.0% | Failure | 3/5 | 37.48 |
+| Candidate radius 15 | 90.0% | Success | 1/4 | **28.16** |
+| Candidate radius 20 | 90.0% | Success | 2/4 | 42.52 |
+
+Overall interpretation:
+
+Candidate waypoint selection appears promising because it improved episode 9 compared to the no-candidate baseline. However, the radius matters.
+
+Radius 10 was too local/restrictive and caused episode 5 to fail. Radius 20 preserved accuracy but gave a worse episode 9 final distance than radius 15. Radius 15 gave the best tradeoff: it preserved 90% accuracy and produced the best episode 9 final distance.
+
+Overall conclusion:
+
+```text
+Candidate waypoint selection can improve the hard failure case, but radius selection matters.
+Radius 15 is the best candidate waypoint setting tested so far.
+The next improvement should focus on filtering or scoring candidate waypoints, not just changing the radius.
+```
+
 ## Comparison Across Experiments
 
 | Setting | Accuracy | Episodes with MLLM calls | Total MLLM calls | Repeated waypoint issue | Average steps | Episode 9 result |
@@ -892,6 +1141,10 @@ This suggests episode 9 is more likely limited by waypoint reachability or DQN e
 | Anti-repeat prompt, `pt1_wp4_np5__avoidrepeat` | 90.0% | 2 | 9 | Exact repeats reduced to 0 | 9.1 | Failed |
 | Obstruction-aware prompt, `pt1_wp4_np5__avoidrepeat__obstructionaware` | 80.0% | 2 | 10 | Exact repeats 0, but extra failure introduced | 32.0 for failed MLLM episodes | Failed |
 | Balanced obstruction-aware prompt, `pt1_wp4_np5__avoidrepeat__balanced_obstructionaware` | 90.0% | 2 | 9 | Exact repeats 0, near repeat 1 | 26.0 for MLLM episodes | Failed |
+| Waypoint-aware stuck detection, `balanced_obstructionaware__wpawarestuck` | 90.0% | 2 | 9 | Exact repeats 0, near repeat 1 | 26.0 for MLLM episodes | Failed |
+| Candidate waypoint radius 10, `candidatewp_r10` | 80.0% | 2 | 9 | Exact repeats 0, near repeat 1 | 32.0 for MLLM episodes | Failed |
+| Candidate waypoint radius 15, `candidatewp_r15` | 90.0% | 2 | 5 | Exact repeats 0, near repeats 0 | 22.5 for MLLM episodes | Failed, but final distance improved to 28.16 |
+| Candidate waypoint radius 20, `candidatewp_r20` | 90.0% | 2 | 5 | Exact repeats 0, near repeats 0 | 22.5 for MLLM episodes | Failed, final distance 42.52 |
 
 Overall interpretation:
 
@@ -1036,6 +1289,5 @@ Possible next steps:
 Most likely next direction:
 
 ```text
-Prompt-only changes can change waypoint behavior, but they have not solved episode 9.
-The next experiment should probably analyze waypoint reachability or test waypoint-aware stuck detection.
-```
+Candidate waypoint selection improved episode 9 final distance, especially with radius 15, but it still did not solve the hard failure case.
+The next experiment should probably focus on candidate waypoint filtering or scoring, not only changing the candidate radius.
