@@ -95,6 +95,11 @@ class HighLevelPolicy(Other):
         generate_waypoints=True,
         pause_after_waypoint=True,
         avoid_repeat_waypoints=False,
+        obstruction_aware_waypoints=False,
+        waypoint_aware_stuck_detection=False,
+        use_candidate_waypoints=False,
+        candidate_waypoint_radius=10,
+        candidate_waypoint_snap_tolerance=2,
         x_min=None,
         x_max=None,
         y_min=None,
@@ -124,6 +129,11 @@ class HighLevelPolicy(Other):
         self.generate_waypoints = generate_waypoints
         self.pause_after_waypoint = pause_after_waypoint
         self.avoid_repeat_waypoints = avoid_repeat_waypoints
+        self.obstruction_aware_waypoints = obstruction_aware_waypoints
+        self.waypoint_aware_stuck_detection = waypoint_aware_stuck_detection
+        self.use_candidate_waypoints = use_candidate_waypoints
+        self.candidate_waypoint_radius = candidate_waypoint_radius
+        self.candidate_waypoint_snap_tolerance = candidate_waypoint_snap_tolerance
         self.progress_threshold = progress_threshold
         self.waypoint_threshold = waypoint_threshold
         self.n_points = n_points
@@ -331,8 +341,97 @@ class HighLevelPolicy(Other):
             fig.savefig(self.image_path, bbox_inches='tight', pad_inches=0)
         else:
             fig.savefig(self.image_path2, bbox_inches='tight', pad_inches=0)
+    
+    def get_candidate_waypoints(self, episode):
+        """
+        Generate simple nearby candidate waypoints around the robot.
+
+        This is a first version of candidate waypoint selection.
+        It creates nearby points in 8 directions around the robot and filters
+        out points outside the map bounds or already attempted exactly.
+        """
+        x_r = episode.point.x
+        y_r = episode.point.y
+        r = self.candidate_waypoint_radius
+
+        offsets = [
+            (r, 0),
+            (-r, 0),
+            (0, r),
+            (0, -r),
+            (r, r),
+            (r, -r),
+            (-r, r),
+            (-r, -r),
+        ]
+
+        previous_waypoints = set()
+        for waypoint in episode.waypoint_history:
+            previous_waypoints.add((waypoint.x, waypoint.y))
+
+        candidates = []
+
+        for dx, dy in offsets:
+            x = int(round(x_r + dx))
+            y = int(round(y_r + dy))
+
+            # Keep candidate inside map bounds.
+            if self.x_min is not None and x < self.x_min:
+                continue
+            if self.x_max is not None and x > self.x_max:
+                continue
+            if self.y_min is not None and y < self.y_min:
+                continue
+            if self.y_max is not None and y > self.y_max:
+                continue
+
+            # Avoid exact repeated candidate waypoints.
+            if (x, y) in previous_waypoints:
+                continue
+
+            candidates.append((x, y))
+
+        return candidates
+
+    def format_candidate_waypoints(self, candidates):
+        """
+        Format candidate waypoints for the prompt.
+        """
+        labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        candidate_text = []
+
+        for idx, candidate in enumerate(candidates):
+            if idx >= len(labels):
+                break
+
+            x, y = candidate
+            candidate_text.append(f"{labels[idx]}: ({x}, {y})")
+
+        return "; ".join(candidate_text)
+
+    def closest_candidate_waypoint(self, waypoint, candidates):
+        """
+        Return the closest candidate waypoint to the parsed waypoint.
+        """
+        if not candidates:
+            return None, None
+
+        x, y = waypoint
+        best_candidate = None
+        best_distance = None
+
+        for candidate in candidates:
+            cx, cy = candidate
+            distance = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_candidate = candidate
+
+        return best_candidate, best_distance
 
     # determine if we generate a new waypoint based on if the agent is stuck
+        # determine if we generate a new waypoint based on if the agent is stuck
     def check_stuck(self, episode):
 
         # used to override if we check (this can avoid inefficient checks or infinite loops)
@@ -343,16 +442,27 @@ class HighLevelPolicy(Other):
         if len(episode.path_history) < self.n_points:
             return False
 
+        # Old behavior:
+        # Always measure progress toward the final target.
+        #
+        # New optional behavior:
+        # If waypoint_aware_stuck_detection is enabled and an intermediate waypoint is active,
+        # measure progress toward the active waypoint instead.
+        if self.waypoint_aware_stuck_detection and episode.waypoint is not None:
+            goal_point = episode.waypoint
+        else:
+            goal_point = episode.target_point
+
         # measure change in progress to goal over last n_points
-        initial_distance_to_target = episode.path_history[-self.n_points].distance(episode.target_point)
-        closest_distance_to_target = initial_distance_to_target
+        initial_distance_to_goal = episode.path_history[-self.n_points].distance(goal_point)
+        closest_distance_to_goal = initial_distance_to_goal
 
         for i in range(1, self.n_points + 1):
             point = episode.path_history[-1 * i]
-            distance = point.distance(episode.target_point)
-            closest_distance_to_target = min(closest_distance_to_target, distance)
+            distance = point.distance(goal_point)
+            closest_distance_to_goal = min(closest_distance_to_goal, distance)
 
-        progress = initial_distance_to_target - closest_distance_to_target
+        progress = initial_distance_to_goal - closest_distance_to_goal
         return progress < self.progress_threshold
 
     # query MLLM to generate intermediate waypoint to get unstuck and make progress towards target
@@ -361,6 +471,10 @@ class HighLevelPolicy(Other):
         # add visual component to multimodal input? If yes then write image to file to read into MLLM
         if self.include_map:
             self.generate_map(episode, True)
+
+        candidate_waypoints = []
+        if self.use_candidate_waypoints:
+            candidate_waypoints = self.get_candidate_waypoints(episode)
 
         # include_state = True will include the robot state information in the linguistic command to the MLLM
         if self.include_state:
@@ -403,6 +517,27 @@ class HighLevelPolicy(Other):
                     'Do not repeat or slightly modify any previous attempted waypoint. '
                     'The previous waypoints did not solve the problem, so choose a substantially different safe waypoint. '
                     'A substantially different waypoint should be in a different area of the map, not just a few meters away from an old waypoint. '
+                )
+
+            if self.obstruction_aware_waypoints:
+                prompt_str += (
+                    "The waypoint should be an immediately reachable subgoal from the robot's current position, "
+                    "not necessarily the final best location. "
+                    "Before choosing the waypoint, consider whether the robot can reach it without being blocked by white obstacle pixels. "
+                    "If the direct path to the target is blocked, choose a nearby safe waypoint that helps the robot move around the obstacle. "
+                    "Prefer the closest safe waypoint that creates a better angle around the obstacle while still making reasonable progress toward the target. "
+                    "Only move sideways or slightly away from the target if necessary, and use the smallest detour needed. "
+                    "Do not choose a waypoint that sends the robot far away from the target or causes it to wander around the obstacle. "
+                    "Avoid waypoints that are behind a wall, inside an obstacle, too close to white obstacle pixels, repeated, or only globally closer to the target but locally unreachable. "
+                )
+
+            if self.use_candidate_waypoints and candidate_waypoints:
+                prompt_str += (
+                    "You must choose the waypoint from the candidate waypoint list below. "
+                    "Do not invent a new waypoint outside this list. "
+                    "These candidates are nearby possible subgoals around the robot. "
+                    "Choose the candidate that is most likely to be immediately reachable and helpful for moving around obstacles toward the target. "
+                    f"Candidate waypoints: {self.format_candidate_waypoints(candidate_waypoints)}. "
                 )
 
             if self.chain_of_thought:
@@ -448,6 +583,27 @@ class HighLevelPolicy(Other):
                     'Do not repeat or slightly modify any previous attempted waypoint. '
                     'The previous waypoints did not solve the problem, so choose a substantially different safe waypoint. '
                     'A substantially different waypoint should be in a different area of the map, not just a few meters away from an old waypoint. '
+                )
+
+            if self.obstruction_aware_waypoints:
+                prompt_str += (
+                    "The waypoint should be an immediately reachable subgoal from the robot's current position, "
+                    "not necessarily the final best location. "
+                    "Before choosing the waypoint, consider whether the robot can reach it without being blocked by white obstacle pixels. "
+                    "If the direct path to the target is blocked, choose a nearby safe waypoint that helps the robot move around the obstacle. "
+                    "Prefer the closest safe waypoint that creates a better angle around the obstacle while still making reasonable progress toward the target. "
+                    "Only move sideways or slightly away from the target if necessary, and use the smallest detour needed. "
+                    "Do not choose a waypoint that sends the robot far away from the target or causes it to wander around the obstacle. "
+                    "Avoid waypoints that are behind a wall, inside an obstacle, too close to white obstacle pixels, repeated, or only globally closer to the target but locally unreachable. "
+                )
+
+            if self.use_candidate_waypoints and candidate_waypoints:
+                prompt_str += (
+                    "You must choose the waypoint from the candidate waypoint list below. "
+                    "Do not invent a new waypoint outside this list. "
+                    "These candidates are nearby possible subgoals around the robot. "
+                    "Choose the candidate that is most likely to be immediately reachable and helpful for moving around obstacles toward the target. "
+                    f"Candidate waypoints: {self.format_candidate_waypoints(candidate_waypoints)}. "
                 )
 
             if self.include_map:
@@ -500,6 +656,32 @@ class HighLevelPolicy(Other):
 
         if not valid:
             return
+
+        # If candidate waypoint mode is enabled, only allow candidate waypoints.
+        # If the MLLM outputs a point very close to a candidate, snap to that candidate.
+        if self.use_candidate_waypoints and candidate_waypoints:
+            parsed_waypoint = (x, y)
+
+            if parsed_waypoint not in candidate_waypoints:
+                closest_candidate, closest_distance = self.closest_candidate_waypoint(
+                    parsed_waypoint,
+                    candidate_waypoints,
+                )
+
+                if (
+                    closest_candidate is not None
+                    and closest_distance <= self.candidate_waypoint_snap_tolerance
+                ):
+                    x, y = closest_candidate
+                else:
+                    if not self.silent:
+                        print(
+                            f"Rejected waypoint {parsed_waypoint} because it is not in candidate list: "
+                            f"{candidate_waypoints}"
+                        )
+
+                    self.pause(episode)
+                    return
 
         waypoint = DataStructure.Point(x, y, self.agent.fixed_z)
         current_goal = episode.waypoint if episode.waypoint is not None else episode.target_point
