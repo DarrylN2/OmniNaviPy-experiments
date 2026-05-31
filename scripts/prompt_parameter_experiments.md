@@ -764,6 +764,124 @@ The balanced obstruction-aware prompt can produce useful waypoints in some cases
 However, episode 9 still failed because only 1 out of 6 generated waypoints was reached.
 This suggests the next step should focus on waypoint reachability or waypoint-aware stuck detection, not only more prompt wording.
 
+---
+
+## Experiment 6: Waypoint-aware Stuck Detection
+
+Run folder:
+
+```text
+Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware__wpawarestuck
+```
+
+Settings:
+
+| Parameter | Value |
+|---|---|
+| `agent_type` | `DataMap` |
+| `mllm_model` | `gemma3:27b` |
+| `progress_threshold` | 1 |
+| `waypoint_threshold` | 4 |
+| `n_points` | 5 |
+| `pause_after_waypoint` | True |
+| `avoid_repeat_waypoints` | True |
+| `obstruction_aware_waypoints` | True |
+| `waypoint_aware_stuck_detection` | True |
+| `n_per_difficulty` | 10 |
+| `n_difficulties` | 1 |
+| `seed` | 777 |
+
+Code changes tested:
+
+- Added an optional `waypoint_aware_stuck_detection` flag to `HighLevelPolicy`.
+- When enabled, `check_stuck()` measures progress toward the active waypoint if one exists.
+- If no waypoint is active, `check_stuck()` still measures progress toward the final target as before.
+
+Command:
+
+```bash
+python3 scripts/evaluate_navigation.py
+```
+
+Analysis commands:
+
+```bash
+python3 scripts/analyze_episodes.py \
+  --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware__wpawarestuck \
+  --mllm-only \
+  --show-waypoints \
+  --csv ignore/results/wpawarestuck_episode_analysis.csv \
+  --waypoint-csv ignore/results/wpawarestuck_waypoint_analysis.csv
+
+python3 scripts/plot_episode_path.py \
+  --run-folder Agent_DataMap__MLLM_gemma3_27b__small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware__wpawarestuck \
+  --episode-id 9 \
+  --output ignore/results/wpawarestuck_episode9_path.png
+```
+
+Result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 90.0% |
+| Episodes | 10 |
+| Successes | 9 |
+| Failures | 1 |
+| Episodes with MLLM calls | 2 |
+| Episodes with waypoints | 2 |
+| Episodes with repeated waypoints | 0 |
+| Episodes with near repeats | 1 |
+| Waypoints reached | 4/9 |
+| Waypoint reach rate | 44.44% |
+| Average min waypoint distance | 5.07 |
+| Average final distance for MLLM episodes | 31.54 |
+
+Episode-level observations:
+
+| Episode | Result | Termination | Steps | MLLM calls | Waypoints | Waypoints reached | Avg min distance to waypoint | Final distance |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 5 | Success | `goal_reached` | 20 | 3 | 3 | 3/3 | 1.67 | 8.06 |
+| 9 | Failure | `max_steps_exceeded` | 32 | 6 | 6 | 1/6 | 8.47 | 55.01 |
+
+Generated waypoints for episode 9:
+
+```text
+(-14, 20); (-20, 15); (-25, 22); (-15, 28); (-18, 32); (-20, 33)
+```
+
+Detailed waypoint outcomes for episode 9:
+
+| Waypoint | Min distance to waypoint | Reached? | Best target progress | Final target progress |
+|---|---:|---|---:|---:|
+| WP1 `(-14, 20)` | 3.61 | True | 0.0 | 0.0 |
+| WP2 `(-20, 15)` | 11.4 | False | 0.0 | 0.0 |
+| WP3 `(-25, 22)` | 14.0 | False | 0.0 | -1.93 |
+| WP4 `(-15, 28)` | 6.08 | False | -0.27 | -3.19 |
+| WP5 `(-18, 32)` | 6.71 | False | 3.69 | 1.07 |
+| WP6 `(-20, 33)` | 9.0 | False | 0.0 | 0.0 |
+
+Comparison with balanced obstruction-aware prompt:
+
+| Setting | Accuracy | Episode 9 waypoints reached | Episode 9 avg min waypoint distance | Episode 9 final distance |
+|---|---:|---:|---:|---:|
+| Balanced obstruction-aware | 90.0% | 1/6 | 9.56 | 53.31 |
+| Balanced obstruction-aware + waypoint-aware stuck detection | 90.0% | 1/6 | 8.47 | 55.01 |
+
+Interpretation:
+
+Waypoint-aware stuck detection did not improve the overall accuracy or solve episode 9.
+
+Episode 5 behaved the same as before: it reached all 3 waypoints and succeeded.
+
+Episode 9 still reached only 1 out of 6 generated waypoints. The average minimum distance to generated waypoints improved slightly, from 9.56 to 8.47, but the final distance to the target became slightly worse, from 53.31 to 55.01.
+
+Conclusion:
+
+```text
+Changing stuck detection to measure progress toward the active waypoint did not solve the hard failure case.
+This suggests episode 9 is more likely limited by waypoint reachability or DQN execution, not only by the stuck-detection target.
+```
+
 ## Comparison Across Experiments
 
 | Setting | Accuracy | Episodes with MLLM calls | Total MLLM calls | Repeated waypoint issue | Average steps | Episode 9 result |

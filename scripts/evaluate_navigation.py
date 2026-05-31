@@ -20,8 +20,9 @@ n_points = 5
 
 avoid_repeat_waypoints = True
 obstruction_aware_waypoints = True
+waypoint_aware_stuck_detection = True
 
-experiment_label = 'small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware'
+experiment_label = 'small_10x1__pt1_wp4_np5__avoidrepeat__balanced_obstructionaware__wpawarestuck'
 
 # make test name to create directory and save results to
 mllm_model_name = 'None' if mllm_model is None else mllm_model.replace(':', '_')
@@ -151,6 +152,7 @@ others.append(
         pause_after_waypoint=pause_after_waypoint,
         avoid_repeat_waypoints=avoid_repeat_waypoints,
         obstruction_aware_waypoints=obstruction_aware_waypoints,
+        waypoint_aware_stuck_detection=waypoint_aware_stuck_detection,
         progress_threshold=progress_threshold,
         waypoint_threshold=waypoint_threshold,
         n_points=n_points,

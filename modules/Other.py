@@ -96,6 +96,7 @@ class HighLevelPolicy(Other):
         pause_after_waypoint=True,
         avoid_repeat_waypoints=False,
         obstruction_aware_waypoints=False,
+        waypoint_aware_stuck_detection=False,
         x_min=None,
         x_max=None,
         y_min=None,
@@ -126,6 +127,7 @@ class HighLevelPolicy(Other):
         self.pause_after_waypoint = pause_after_waypoint
         self.avoid_repeat_waypoints = avoid_repeat_waypoints
         self.obstruction_aware_waypoints = obstruction_aware_waypoints
+        self.waypoint_aware_stuck_detection = waypoint_aware_stuck_detection
         self.progress_threshold = progress_threshold
         self.waypoint_threshold = waypoint_threshold
         self.n_points = n_points
@@ -335,6 +337,7 @@ class HighLevelPolicy(Other):
             fig.savefig(self.image_path2, bbox_inches='tight', pad_inches=0)
 
     # determine if we generate a new waypoint based on if the agent is stuck
+        # determine if we generate a new waypoint based on if the agent is stuck
     def check_stuck(self, episode):
 
         # used to override if we check (this can avoid inefficient checks or infinite loops)
@@ -345,16 +348,27 @@ class HighLevelPolicy(Other):
         if len(episode.path_history) < self.n_points:
             return False
 
+        # Old behavior:
+        # Always measure progress toward the final target.
+        #
+        # New optional behavior:
+        # If waypoint_aware_stuck_detection is enabled and an intermediate waypoint is active,
+        # measure progress toward the active waypoint instead.
+        if self.waypoint_aware_stuck_detection and episode.waypoint is not None:
+            goal_point = episode.waypoint
+        else:
+            goal_point = episode.target_point
+
         # measure change in progress to goal over last n_points
-        initial_distance_to_target = episode.path_history[-self.n_points].distance(episode.target_point)
-        closest_distance_to_target = initial_distance_to_target
+        initial_distance_to_goal = episode.path_history[-self.n_points].distance(goal_point)
+        closest_distance_to_goal = initial_distance_to_goal
 
         for i in range(1, self.n_points + 1):
             point = episode.path_history[-1 * i]
-            distance = point.distance(episode.target_point)
-            closest_distance_to_target = min(closest_distance_to_target, distance)
+            distance = point.distance(goal_point)
+            closest_distance_to_goal = min(closest_distance_to_goal, distance)
 
-        progress = initial_distance_to_target - closest_distance_to_target
+        progress = initial_distance_to_goal - closest_distance_to_goal
         return progress < self.progress_threshold
 
     # query MLLM to generate intermediate waypoint to get unstuck and make progress towards target
