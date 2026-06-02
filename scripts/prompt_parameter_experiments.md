@@ -91,6 +91,10 @@ The high-level MLLM waypoint logic is controlled mainly by these parameters:
 | `pause_after_waypoint` | Whether to pause MLLM checks after a waypoint is generated |
 | `avoid_repeat_waypoints` | Whether to add stronger prompt wording that discourages repeated waypoint suggestions |
 | `obstruction_aware_waypoints` | Whether to add prompt wording that asks for reachable, obstruction-aware waypoints |
+| `waypoint_aware_stuck_detection` | Whether stuck detection checks progress toward the active waypoint instead of always checking the final target |
+| `use_candidate_waypoints` | Whether the MLLM must choose from nearby generated candidate waypoints |
+| `candidate_waypoint_radius` | Distance from the robot used to generate candidate waypoints |
+| `candidate_waypoint_snap_tolerance` | Distance tolerance for snapping an MLLM output to the nearest candidate waypoint |
 
 The stuck detector checks whether the drone has made enough progress toward the target over the last `n_points`.
 
@@ -437,6 +441,8 @@ The generated waypoint quality or the hard trajectory itself may need deeper ana
 
 ## Experiment 3: Anti-repeat Prompt
 
+In the earlier trigger experiment, episode 9 failed partly because the MLLM kept repeating the same waypoint. This experiment changed the prompt so the MLLM was explicitly told not to repeat or slightly modify previous failed waypoints. The goal was to test whether waypoint diversity alone could improve the hard failure case.
+
 Run folder:
 
 ```text
@@ -529,6 +535,8 @@ This suggests the next problem may be waypoint quality or waypoint reachability,
 ---
 
 ## Experiment 4: Obstruction-aware Prompt
+
+This experiment tried to make the MLLM more aware of blocked or unreachable waypoints. The prompt asked the MLLM to choose waypoints around openings, corners, gaps, or passages instead of placing a waypoint behind an obstacle. The goal was to test whether stronger obstacle-aware wording would improve waypoint quality.
 
 Run folder:
 
@@ -629,6 +637,8 @@ The prompt may have encouraged too much obstacle-avoidance or escape behavior wi
 ---
 
 ## Experiment 5: Balanced Obstruction-aware Prompt
+
+In the previous obstruction-aware prompt, the MLLM seemed to focus too much on escaping obstacles, which caused episode 5 to fail. In this balanced version, I kept the obstruction-aware idea but softened the wording. The MLLM was asked to choose a nearby reachable waypoint that still makes reasonable progress toward the target, instead of taking a large detour away from the goal.
 
 Run folder:
 
@@ -767,6 +777,8 @@ This suggests the next step should focus on waypoint reachability or waypoint-aw
 
 ## Experiment 6: Waypoint-aware Stuck Detection
 
+Before this experiment, stuck detection always measured whether the drone was making progress toward the final target. However, when the drone is following an intermediate waypoint, it may need to move sideways or temporarily away from the final target. This experiment tested whether stuck detection should instead measure progress toward the active waypoint when one exists.
+
 Run folder:
 
 ```text
@@ -884,6 +896,8 @@ This suggests episode 9 is more likely limited by waypoint reachability or DQN e
 ---
 
 ## Experiment 7: Candidate Waypoint Selection
+
+Before this experiment, the MLLM could freely generate any waypoint coordinate. This sometimes produced waypoints that looked reasonable globally but were not reachable by the DQN policy. In this experiment, the code first generated nearby candidate waypoints around the robot, then the MLLM had to choose from that list instead of inventing a completely new waypoint.
 
 Goal:
 
@@ -1193,6 +1207,10 @@ Meaning:
 | `wp4` | `waypoint_threshold = 4` |
 | `np5` | `n_points = 5` |
 | `avoidrepeat` | Prompt variant discouraging repeated waypoint suggestions |
+| `wpawarestuck` | Stuck detection measures progress toward the active waypoint when one exists |
+| `candidatewp_r10` | Candidate waypoint selection with radius 10 |
+| `candidatewp_r15` | Candidate waypoint selection with radius 15 |
+| `candidatewp_r20` | Candidate waypoint selection with radius 20 |
 
 This helps avoid overwriting old result folders and makes experiment comparison easier.
 
@@ -1247,47 +1265,31 @@ The CSV files are saved under `ignore/`, so they are local analysis outputs and 
 
 ## Possible Next Directions
 
-Based on these experiments, the next useful direction is probably not more trigger tuning or simple prompt-only changes.
+Based on these experiments, the next useful direction is probably not more trigger tuning or prompt-only changes.
 
 Completed so far:
 
 1. Added repeated-waypoint analysis to `analyze_episodes.py`.
-2. Added a prompt instruction asking the MLLM to avoid previous failed waypoints.
-3. Confirmed that the anti-repeat prompt reduced exact repeated waypoints from 4 to 0 in episode 9.
-4. Confirmed that episode 9 still failed even with more diverse waypoints.
-5. Added obstruction-aware prompt wording.
-6. Found that the stronger obstruction-aware prompt reduced accuracy from 90% to 80% and introduced a new failure in episode 5.
-7. Added a balanced obstruction-aware prompt.
-8. Found that the balanced obstruction-aware prompt recovered accuracy to 90% and fixed episode 5, but episode 9 still failed.
+2. Added waypoint-following analysis to check whether generated waypoints were actually reached.
+3. Added a plotting script to visualize episode paths and waypoint histories.
+4. Tested trigger sensitivity using `n_points` and `progress_threshold`.
+5. Tested anti-repeat prompt wording.
+6. Tested obstruction-aware and balanced obstruction-aware prompt wording.
+7. Tested waypoint-aware stuck detection.
+8. Tested candidate waypoint selection with radii 10, 15, and 20.
 
-Possible next steps:
+Main findings:
 
-1. Add waypoint-following analysis:
-   - Did the drone actually move closer to each generated waypoint after it was set?
-   - Did the drone ever get within `waypoint_threshold` of the waypoint?
-   - If not, the issue may be that the low-level DQN cannot reach the waypoint.
-2. Add waypoint-quality analysis:
-   - Is the waypoint closer to the target than the robot's current position?
-   - Is the waypoint too far away?
-   - Is the waypoint near obstacles or outside safe regions?
-3. Compare generated waypoints against path history:
-   - Did the waypoint send the robot back into an already failed area?
-   - Did the waypoint lead to a new region of the map?
-4. Inspect episode 9 visually:
-   - Open `image_display.png` or saved map images for the failed run.
-   - Check whether the generated waypoints are actually reasonable.
-5. Test waypoint-aware stuck detection:
-   - Currently, the stuck detector measures progress toward the final target.
-   - When an intermediate waypoint is active, it may be better to measure progress toward the active waypoint.
-   - This matters because obstacle-avoidance waypoints may require the drone to move sideways or temporarily away from the final target.
-6. Add a code-level waypoint filter:
-   - Reject exact repeated waypoints.
-   - Reject near-repeated waypoints.
-   - Reject waypoints that are too far from the current robot position.
-   - Reject waypoints that do not improve reachability or appear blocked.
+```text
+More MLLM calls did not improve accuracy.
+Anti-repeat prompting reduced repeated waypoints but did not solve episode 9.
+Strong obstruction-aware prompting hurt accuracy.
+Balanced obstruction-aware prompting recovered accuracy but still did not solve episode 9.
+Waypoint-aware stuck detection did not solve episode 9.
+Candidate waypoint selection improved episode 9 final distance, especially with radius 15, but still did not solve the hard failure case.
 
 Most likely next direction:
 
 ```text
-Candidate waypoint selection improved episode 9 final distance, especially with radius 15, but it still did not solve the hard failure case.
-The next experiment should probably focus on candidate waypoint filtering or scoring, not only changing the candidate radius.
+The next experiment should probably focus on candidate waypoint filtering or scoring.
+Instead of only changing the candidate radius, candidate waypoints should be ranked or filtered based on reachability, target progress, distance from prior failed waypoints, and obstacle/path safety.
