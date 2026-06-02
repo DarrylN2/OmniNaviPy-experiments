@@ -431,7 +431,6 @@ class HighLevelPolicy(Other):
         return best_candidate, best_distance
 
     # determine if we generate a new waypoint based on if the agent is stuck
-        # determine if we generate a new waypoint based on if the agent is stuck
     def check_stuck(self, episode):
 
         # used to override if we check (this can avoid inefficient checks or infinite loops)
